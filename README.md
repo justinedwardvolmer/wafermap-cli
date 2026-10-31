@@ -53,6 +53,8 @@ Give Claude Desktop, Cursor or any MCP client the same wallet:
 
 Tools: `wafermap_wallet`, `wafermap_resources`, `wafermap_call`, `wafermap_discover`, `wafermap_pay`, `wafermap_swap_quote`, `wafermap_swap`, `wafermap_history`. Swaps from MCP are off until you run `wafermap limits --mcp-swaps on`.
 
+To approve every payment yourself, run `wafermap limits --mcp-confirm on` and restart the MCP server. Each payment and swap then waits for you in the client, showing the amount, asset, recipient, network and resource, before the wallet signs. It uses MCP elicitation; a client that cannot show the prompt gets a refusal and nothing is paid. The caps still apply first.
+
 ## SDK
 
 ```ts
@@ -71,7 +73,7 @@ Pass `approve: (a) => boolean` to confirm each payment or swap yourself, and `le
 
 ## Where the limits live
 
-The caps sit with the key, on your machine. Before the wallet signs anything it reads the 402 quote and refuses when the price is above the per-payment cap or would take today's spend past the daily cap, so nothing is signed and nothing can be charged. Wafermap's server only quotes, verifies the signature, runs the resource and settles if it worked; it never sees your key or your caps. A budget written in a prompt is an instruction, not a limit: set it with `wafermap limits`. More: https://wafermap.xyz/docs#limits
+The caps sit with the key, on your machine. Before the wallet signs anything it reads the 402 quote and refuses when the price is above the per-payment cap or would take today's spend past the daily cap, so nothing is signed and nothing can be charged. With `--mcp-confirm on`, you also approve each MCP payment yourself before it is signed. Wafermap's server only quotes, verifies the signature, runs the resource and settles if it worked; it never sees your key or your caps. A budget written in a prompt is an instruction, not a limit: set it with `wafermap limits`. More: https://wafermap.xyz/docs#limits
 
 The checks are in [`src/core.ts`](src/core.ts) (`gate`), the keystore in [`src/store.ts`](src/store.ts), payment signing in [`shared/x402client.ts`](shared/x402client.ts) and [`shared/solana.ts`](shared/solana.ts).
 

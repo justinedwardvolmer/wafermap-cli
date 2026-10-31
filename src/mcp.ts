@@ -2,10 +2,12 @@
 // Wafermap wallet. Payments stay inside the caps in ~/.wafermap/config.json. Swaps are off
 // unless you turn them on with `wafermap limits --mcp-swaps on`.
 // The keystore password comes from WAFERMAP_PASSWORD in the MCP client's config.
+// With `wafermap limits --mcp-confirm on`, every payment and swap also waits for the person to approve it
+// in the client (MCP elicitation); a client that cannot ask gets a refusal, never a silent payment.
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { WafermapError } from "./core.js";
+import { WafermapError, type Approval } from "./core.js";
 import { openWallet } from "./local.js";
 import { config, spendLog } from "./store.js";
 import { VERSION } from "./version.js";
@@ -40,21 +42,46 @@ function failure(e: any) {
   return { isError: true, content: [{ type: "text" as const, text: msg }] };
 }
 
+/** Asks the person to approve one payment or swap, after the caps have passed and before anything is signed. */
+async function confirmWithPerson(server: McpServer, a: Approval): Promise<boolean> {
+  if (!server.server.getClientCapabilities()?.elicitation) {
+    throw new WafermapError(
+      "confirm_unavailable",
+      "Per-payment confirmation is on, but this MCP client cannot show an approval prompt, so nothing was paid. Use a client that supports MCP elicitation, or turn it off with `wafermap limits --mcp-confirm off`.",
+    );
+  }
+  const message =
+    a.kind === "swap"
+      ? `Approve this swap?
+
+${a.what} (${a.detail}), worth about $${a.usd.toFixed(2)}, on ${a.network}.`
+      : `Approve this payment?
+
+$${a.usd} ${a.detail ?? ""} on ${a.network}
+for ${a.what}`;
+  const r = await server.server.elicitInput({
+    mode: "form",
+    message,
+    requestedSchema: { type: "object", properties: { approve: { type: "boolean", title: "Approve", description: "Sign and pay this one call", default: false } }, required: ["approve"] },
+  });
+  return r.action === "accept" && r.content?.approve === true;
+}
+
 export async function runMcp() {
   const password = process.env.WAFERMAP_PASSWORD;
   if (!password) {
     process.stderr.write("Set WAFERMAP_PASSWORD in your MCP client's env for this server.\n");
     process.exit(1);
   }
-  const wm = openWallet(password);
   const server = new McpServer({ name: "wafermap", version: VERSION });
+  const wm = openWallet(password, config().mcpConfirm ? (a) => confirmWithPerson(server, a) : undefined);
 
   server.registerTool(
     "wafermap_wallet",
     { title: "Wallet status", description: "The agent wallet's address, USDG/USDC and ETH balances on Robinhood Chain and Base, spending caps and today's spend.", inputSchema: {} },
     async () => {
       try {
-        return text({ address: wm.address, balances: await wm.balances(), limits: wm.limits, spentTodayUsd: Number(wm.spentToday().toFixed(6)), network: wm.network, swapsEnabled: !!config().mcpSwaps });
+        return text({ address: wm.address, balances: await wm.balances(), limits: wm.limits, spentTodayUsd: Number(wm.spentToday().toFixed(6)), network: wm.network, swapsEnabled: !!config().mcpSwaps, confirmEachPayment: !!config().mcpConfirm });
       } catch (e) {
         return failure(e);
       }

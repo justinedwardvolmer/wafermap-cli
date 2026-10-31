@@ -15,7 +15,7 @@ Wallet
   wafermap init [--import]              create (or import) the agent wallet, encrypted with a password
   wafermap address                      print the wallet addresses (EVM and Solana)
   wafermap balance                      USDG / USDC and gas on every payment network
-  wafermap limits [--per-payment 0.1] [--per-day 1] [--per-swap 25] [--network <net>] [--mcp-swaps on|off]
+  wafermap limits [--per-payment 0.1] [--per-day 1] [--per-swap 25] [--network <net>] [--mcp-swaps on|off] [--mcp-confirm on|off]
   wafermap history [--days 7]           payments and swaps from this machine
   wafermap export-key [--solana]        print the private key, or the Solana key for Phantom/Solflare
 
@@ -189,8 +189,9 @@ async function main() {
       if (c.limits.perPayment > c.limits.perDay) die("The per-payment cap cannot be above the daily cap.");
       c.network = net(a.flags.network) ?? c.network;
       if (a.flags["mcp-swaps"] !== undefined) c.mcpSwaps = a.flags["mcp-swaps"] === "on";
+      if (a.flags["mcp-confirm"] !== undefined) c.mcpConfirm = a.flags["mcp-confirm"] === "on";
       if (Object.keys(a.flags).length) saveConfig(c);
-      return console.log(`Per payment $${c.limits.perPayment} · per day $${c.limits.perDay} · per swap $${c.limits.perSwap} · network ${c.network} · swaps from MCP ${c.mcpSwaps ? "on" : "off"}`);
+      return console.log(`Per payment $${c.limits.perPayment} · per day $${c.limits.perDay} · per swap $${c.limits.perSwap} · network ${c.network} · swaps from MCP ${c.mcpSwaps ? "on" : "off"} · confirm each MCP payment ${c.mcpConfirm ? "on" : "off"}`);
     }
 
     case "history": {
