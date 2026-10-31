@@ -1,0 +1,56 @@
+{
+  "name": "wafermap",
+  "version": "0.3.1",
+  "description": "Wafermap for agents: an encrypted local wallet that pays x402 resources, discovers and pays third-party x402 services (USDG on Robinhood Chain; USDC on Solana, Base, Arbitrum, Polygon), and swaps on Robinhood Chain and Base. CLI, SDK and MCP server.",
+  "type": "module",
+  "bin": {
+    "wafermap": "dist/cli.js"
+  },
+  "main": "dist/index.js",
+  "types": "dist/types/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/types/src/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "node build.mjs"
+  },
+  "keywords": [
+    "x402",
+    "agents",
+    "mcp",
+    "wallet",
+    "robinhood-chain",
+    "base",
+    "arbitrum",
+    "polygon",
+    "solana",
+    "usdg",
+    "usdc"
+  ],
+  "homepage": "https://wafermap.xyz/docs#cli",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "@noble/curves": "^1.9.1",
+    "@noble/hashes": "^1.8.0",
+    "@scure/base": "^1.2.6",
+    "viem": "^2.56.8",
+    "zod": "4.6.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "esbuild": "^0.28.1",
+    "typescript": "^7.0.2"
+  }
+}
