@@ -39,6 +39,13 @@
     "usdc"
   ],
   "homepage": "https://wafermap.xyz/docs#cli",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/wafermap/wafermap-cli.git"
+  },
+  "bugs": {
+    "url": "https://github.com/wafermap/wafermap-cli/issues"
+  },
   "license": "MIT",
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.1",

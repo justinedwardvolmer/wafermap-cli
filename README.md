@@ -78,7 +78,7 @@ The checks are in [`src/core.ts`](src/core.ts) (`gate`), the keystore in [`src/s
 ## Build from source
 
 ```bash
-git clone <this repo> && cd wafermap-cli
+git clone https://github.com/wafermap/wafermap-cli.git && cd wafermap-cli
 npm ci
 npm run build          # dist/cli.js, dist/index.js and type declarations
 node dist/cli.js --help
