@@ -30,9 +30,7 @@ jobs:
       # On failure, rerun with TAP and turn each failing test into an annotation, so the reason is
       # readable from the run page without downloading logs.
       - if: failure()
-        run: node -e "const r=require('child_process').spawnSync(process.execPath,['--test','--test-reporter=tap'],{encoding:'utf8'});const o=r.stdout||'';const b=o.split(/
-(?=\s*(?:not )?ok \d)/).filter(x=>/^\s*not ok/.test(x));for(const x of b)console.log('::error::'+x.slice(0,3000).replace(/%/g,'%25').replace(/?
-/g,'%0A'))"
+        run: node scripts/ci-annotate.mjs
       # The shipped tarball is built from this repo: print its checksum so anyone can compare it with
       # https://wafermap.xyz/cli/wafermap-<version>.tgz
       - run: npm pack --silent
