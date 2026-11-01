@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.2 (2 Nov 2026)
+
+**$WAFERMAP holder discount.** `call()` (CLI `wafermap call`, MCP `wafermap_call`) now names the paying wallet to Wafermap in an `X-Wafermap-Payer` header, so a wallet holding at least 100,000 $WAFERMAP on Robinhood Chain is quoted 50% less for Wafermap's own resources, on EVM networks. Wafermap checks the balance again against the signer of the payment, so the header only ever lowers the price for the wallet that actually holds. The header goes to Wafermap only: `pay()` sends nothing extra to third-party services. Marketplace listings keep their seller's price.
+
 ## 0.4.1 (2 Nov 2026)
 
 On npm as **`@wafermapxyz/cli`**: `npm i -g @wafermapxyz/cli` (SDK: `import { Wafermap } from "@wafermapxyz/cli"`). The command stays `wafermap`, the wallet stays in `~/.wafermap`. The registry refuses the bare name `wafermap` for everyone, so the package lives under our own scope. If you installed from the tarball, run `npm rm -g wafermap` before installing the scoped package. No code changes since 0.4.0.

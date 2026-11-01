@@ -80,6 +80,10 @@ await wm.swap(quote);
 
 Pass `approve: (a) => boolean` to confirm each payment or swap yourself, and `ledger` to persist spending for the daily cap. Lower level: `x402fetch(url, init, { signer })` pays any x402 v1 or v2 endpoint.
 
+## $WAFERMAP holder discount
+
+A wallet that holds at least 100,000 $WAFERMAP on Robinhood Chain pays 50% less for Wafermap's own resources when it pays on an EVM network (Robinhood Chain, Base, Arbitrum, Polygon). Nothing to set up: `wafermap call` names the wallet to Wafermap and the quote comes back discounted; the server re-checks the balance of the wallet that signs. Marketplace listings and Solana payments keep the regular price. Check a wallet: https://wafermap.xyz/api/holder?address=0x…
+
 ## Where the limits live
 
 The caps sit with the key, on your machine. Before the wallet signs anything it reads the 402 quote and refuses when the price is above the per-payment cap or would take today's spend past the daily cap, so nothing is signed and nothing can be charged. With `--mcp-confirm on`, you also approve each MCP payment yourself before it is signed. A budget written in a prompt is an instruction, not a limit: set it with `wafermap limits`. More: https://wafermap.xyz/docs#limits

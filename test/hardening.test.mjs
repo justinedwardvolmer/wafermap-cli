@@ -221,3 +221,28 @@ test("keychain: the MCP password is stored by the OS, unlocks the wallet, and is
   assert.equal(cli(["keychain", "off"], env).status, 0);
   assert.match(cli(["keychain"], env).stdout, /^Off/);
 });
+
+// ---- $WAFERMAP holder discount ----
+
+test("call() names the paying wallet to Wafermap (X-Wafermap-Payer); pay() never sends it to a third party", async () => {
+  const seen = [];
+  const s = createServer((req, res) => {
+    seen.push({ url: req.url, payer: req.headers["x-wafermap-payer"] ?? null });
+    req.resume();
+    req.on("end", () => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ resource: "r", result: { ok: true } }));
+    });
+  });
+  await new Promise((r) => s.listen(0, "127.0.0.1", r));
+  const url = `http://127.0.0.1:${s.address().port}`;
+  try {
+    const { wm } = wallet(url);
+    await wm.call("r");
+    await wm.pay(`${url}/third-party`);
+    assert.equal(seen[0].payer, wm.address);
+    assert.equal(seen[1].payer, null);
+  } finally {
+    await new Promise((r) => (s.closeAllConnections(), s.close(r)));
+  }
+});

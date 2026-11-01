@@ -293,7 +293,9 @@ export class Wafermap {
   }
 
   async call(id: string, input: Record<string, unknown> = {}, o: { network?: Net } = {}) {
-    const go = () => this.paidFetch("resource", id, `${this.baseUrl}/v1/${id}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) }, o.network);
+    // X-Wafermap-Payer names this wallet so a $WAFERMAP holder is quoted the holder price (only sent to Wafermap,
+    // never to third-party services; the server checks the balance again against the signed payment).
+    const go = () => this.paidFetch("resource", id, `${this.baseUrl}/v1/${id}`, { method: "POST", headers: { "content-type": "application/json", "x-wafermap-payer": this.address }, body: JSON.stringify(input) }, o.network);
     const settle = (r: Awaited<ReturnType<typeof go>>, out: any) => {
       if (!r.paid || !r.id) return;
       const status: PaymentStatus = r.res.status === 402 ? "refused" : r.res.ok ? "ok" : "failed";
