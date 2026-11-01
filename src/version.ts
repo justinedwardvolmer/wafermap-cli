@@ -1,2 +1,2 @@
 // Replaced at build time from package.json.
-export const VERSION = "0.4.0";
+export const VERSION = "0.4.1";

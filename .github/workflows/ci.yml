@@ -32,6 +32,6 @@ jobs:
       - if: failure()
         run: node scripts/ci-annotate.mjs
       # The shipped tarball is built from this repo: print its checksum so anyone can compare it with
-      # https://wafermap.xyz/cli/wafermap-<version>.tgz
+      # https://wafermap.xyz/cli/wafermap-<version>.tgz and the npm package @wafermapxyz/cli
       - run: npm pack --silent
-      - run: node -e "const f=require('fs').readdirSync('.').find(x=>/^wafermap-.*\.tgz$/.test(x));console.log(require('crypto').createHash('sha256').update(require('fs').readFileSync(f)).digest('hex'),f)"
+      - run: node -e "const f=require('fs').readdirSync('.').find(x=>/\.tgz$/.test(x));console.log(require('crypto').createHash('sha256').update(require('fs').readFileSync(f)).digest('hex'),f)"

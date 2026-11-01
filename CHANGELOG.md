@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.4.1 (2 Nov 2026)
+
+On npm as **`@wafermapxyz/cli`**: `npm i -g @wafermapxyz/cli` (SDK: `import { Wafermap } from "@wafermapxyz/cli"`). The command stays `wafermap`, the wallet stays in `~/.wafermap`. The registry refuses the bare name `wafermap` for everyone, so the package lives under our own scope. If you installed from the tarball, run `npm rm -g wafermap` before installing the scoped package. No code changes since 0.4.0.
+
 ## 0.4.0 (2 Nov 2026)
 
 From the second public review by @whoiskn0why, thank you.
@@ -12,7 +16,7 @@ From the second public review by @whoiskn0why, thank you.
 - Tests for all of the above (`test/hardening.test.mjs`: real DPAPI on Windows; the macOS and Linux stores are exercised against a stub). CI also runs on Windows and macOS.
 - The SDK exports `quoteSwap`, `executeSwap`, `decodeSwap`, `KYBER_ROUTER`, `MAX_VALIDITY_SECONDS` and `DEFAULT_TIMEOUT_MS`.
 
-npm: the name `wafermap` is refused by the registry for everyone (too similar to an existing package), so it cannot be published by us or anyone else. Install from https://wafermap.xyz/cli/wafermap.tgz or from this repository.
+npm: the name `wafermap` is refused by the registry for everyone (too similar to an existing package). From 0.4.1 the package is `@wafermapxyz/cli`.
 
 ## 0.3.3 (1 Nov 2026)
 

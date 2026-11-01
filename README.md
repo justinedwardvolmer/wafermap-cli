@@ -11,11 +11,11 @@ Every payment is checked against a per-payment cap and a daily cap before anythi
 ## Install
 
 ```bash
-npm i -g https://wafermap.xyz/cli/wafermap.tgz
+npm i -g @wafermapxyz/cli
 wafermap init
 ```
 
-Install only from wafermap.xyz or from this repository. `npm i -g wafermap` (the bare registry name) is **not** this package.
+The command is `wafermap`. The package is **`@wafermapxyz/cli`** on npm (the `wafermapxyz` scope, after the wafermap.xyz domain), the same build as https://wafermap.xyz/cli/wafermap.tgz and this repository. The bare name `wafermap` on npm is **not** this package: the registry refuses it for everyone. Coming from the tarball install? Run `npm rm -g wafermap` first; your wallet in `~/.wafermap` stays.
 
 `init` creates a key and encrypts it with your password (scrypt + AES-256-GCM) in `~/.wafermap/keystore.json`. Back it up with `wafermap export-key`. Then send a few dollars of USDC on Solana to the Solana address it prints, or USDG (Robinhood Chain) or USDC (Base, Arbitrum, Polygon) to its EVM address.
 
@@ -67,7 +67,7 @@ To approve every payment yourself, run `wafermap limits --mcp-confirm on` and re
 ## SDK
 
 ```ts
-import { Wafermap } from "wafermap";
+import { Wafermap } from "@wafermapxyz/cli";
 
 const wm = new Wafermap({ privateKey: process.env.AGENT_KEY as `0x${string}`, limits: { perPayment: 0.05, perDay: 2 } });
 
