@@ -32,19 +32,28 @@ function decode(v: string): string | null {
 }
 
 function run(cmd: string, args: string[], input?: string, env?: Record<string, string>) {
-  const r = spawnSync(cmd, args, { input, encoding: "utf8", env: { ...process.env, ...env }, windowsHide: true, timeout: 20_000 });
+  const merged: NodeJS.ProcessEnv = { ...process.env, ...env };
+  // Windows PowerShell 5.1 started from PowerShell 7 inherits a PSModulePath it cannot load modules
+  // from; the DPAPI calls below use .NET directly, and a clean PSModulePath keeps 5.1 at its defaults.
+  if (cmd === POWERSHELL) delete merged.PSModulePath;
+  const r = spawnSync(cmd, args, { input, encoding: "utf8", env: merged, windowsHide: true, timeout: 20_000 });
   if (r.error) throw new Error(`${cmd} could not run: ${(r.error as any).code === "ENOENT" ? "not installed" : r.error.message}`);
   return { ok: r.status === 0, out: r.stdout ?? "", err: (r.stderr ?? "").trim() };
 }
 
 const PS = ["-NoProfile", "-NonInteractive", "-Command"];
+/** Windows PowerShell by full path, not whatever `powershell` is first on PATH. */
+const POWERSHELL = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
+// DPAPI through .NET (ProtectedData, CurrentUser scope): no cmdlets, so no module has to load.
+const DPAPI_PROTECT = "[void][Reflection.Assembly]::LoadWithPartialName('System.Security'); $b = [Text.Encoding]::UTF8.GetBytes([Console]::In.ReadToEnd()); [Console]::Out.Write([Convert]::ToBase64String([Security.Cryptography.ProtectedData]::Protect($b, $null, 'CurrentUser')))";
+const DPAPI_UNPROTECT = "[void][Reflection.Assembly]::LoadWithPartialName('System.Security'); $b = [Convert]::FromBase64String([IO.File]::ReadAllText($env:WM_DPAPI_FILE).Trim()); [Console]::Out.Write([Text.Encoding]::UTF8.GetString([Security.Cryptography.ProtectedData]::Unprotect($b, $null, 'CurrentUser')))";
 
 /** Store the password. Throws with the reason when the OS store is not available. */
 export function keychainSet(password: string) {
   const b = backend();
   const value = encode(password);
   if (b === "windows-dpapi") {
-    const r = run("powershell", [...PS, "$p = [Console]::In.ReadToEnd(); ConvertTo-SecureString -String $p -AsPlainText -Force | ConvertFrom-SecureString"], value);
+    const r = run(POWERSHELL, [...PS, DPAPI_PROTECT], value);
     if (!r.ok || !r.out.trim()) throw new Error(`DPAPI refused: ${r.err || "no output"}`);
     secureWrite(DPAPI_FILE, r.out.trim());
   } else if (b === "macos-keychain") {
@@ -63,7 +72,7 @@ export function keychainGet(): string | null {
   try {
     if (b === "windows-dpapi") {
       if (!existsSync(DPAPI_FILE)) return null;
-      const r = run("powershell", [...PS, "$s = ConvertTo-SecureString ((Get-Content -Raw -LiteralPath $env:WM_DPAPI_FILE).Trim()); [Runtime.InteropServices.Marshal]::PtrToStringBSTR([Runtime.InteropServices.Marshal]::SecureStringToBSTR($s))"], undefined, { WM_DPAPI_FILE: DPAPI_FILE });
+      const r = run(POWERSHELL, [...PS, DPAPI_UNPROTECT], undefined, { WM_DPAPI_FILE: DPAPI_FILE });
       return r.ok ? decode(r.out) : null;
     }
     if (b === "macos-keychain") {
