@@ -7,7 +7,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { WafermapError, type Approval } from "./core.js";
+import { WafermapError, mergeLog, type Approval } from "./core.js";
 import { openWallet } from "./local.js";
 import { config, spendLog } from "./store.js";
 import { VERSION } from "./version.js";
@@ -193,7 +193,7 @@ export async function runMcp() {
   server.registerTool(
     "wafermap_history",
     { title: "Spending history", description: "Recent payments and swaps made by this wallet.", inputSchema: { limit: z.number().int().min(1).max(200).optional() } },
-    async ({ limit }) => text(spendLog().slice(-(limit ?? 30)).reverse()),
+    async ({ limit }) => text(mergeLog(spendLog()).slice(-(limit ?? 30)).reverse()),
   );
 
   await server.connect(new StdioServerTransport());

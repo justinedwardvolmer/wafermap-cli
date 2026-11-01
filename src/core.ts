@@ -4,14 +4,15 @@
 //   pay()      call any x402 URL and pay it (USDG on Robinhood Chain; USDC on Solana, Base, Arbitrum, Polygon)
 //   swapQuote() / swap()  trade tokens through the KyberSwap aggregator
 // Every payment is checked against per-payment and daily caps before anything is signed;
-// swaps are checked against a per-swap cap. Nothing is ever sent to Wafermap but the signed
-// payment header the x402 protocol requires.
+// swaps are checked against a per-swap cap. The daily cap counts what this wallet signed, at the
+// full signed amount, the moment it is signed: never what a server reports it charged.
+// Nothing is ever sent to Wafermap but the signed payment header the x402 protocol requires.
 import { createPublicClient, createWalletClient, erc20Abi, formatUnits, getAddress, http, isAddress, parseUnits, type Hex, type LocalAccount, type PublicClient } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { arbitrum, base, polygon, robinhood } from "viem/chains";
 import { TOKENS, executeSwap, quoteSwap, resolveToken, type Net as SwapNet, type SwapQuote, type Token } from "../shared/swap";
 import { latestBlockhash, solanaBalances, solanaKeyFromEvm, type SolanaPayer } from "../shared/solana";
-import { CHAIN_KEYS, PAY_CHAINS, x402fetch, X402Error, type ChainKey, type Requirement } from "../shared/x402client";
+import { CHAIN_KEYS, PAY_CHAINS, x402fetch, X402Error, type ChainKey, type Requirement, type Signed } from "../shared/x402client";
 
 /** A payment network. Swaps run on Robinhood Chain and Base only. */
 export type Net = ChainKey;
@@ -20,7 +21,32 @@ export const NETS: Net[] = CHAIN_KEYS;
 export const isNet = (v: unknown): v is Net => NETS.includes(v as Net);
 const isSwapNet = (v: unknown): v is SwapNet => v === "robinhood" || v === "base";
 export type Limits = { perPayment: number; perDay: number; perSwap: number };
-export type SpendEntry = { at: number; kind: "resource" | "service" | "swap"; what: string; usd: number; network: Net; tx: string | null; payer: string };
+/**
+ * One line of the spend log. A payment writes two lines: the signed amount the moment it is
+ * signed (`status: "signed"`, counted by the daily cap), then the outcome with `usd: 0` and
+ * `of` pointing back to it. Older logs have single lines without `id`; `mergeLog` joins them.
+ */
+export type SpendEntry = {
+  at: number;
+  kind: "resource" | "service" | "swap";
+  what: string;
+  usd: number;
+  network: Net;
+  tx: string | null;
+  payer: string;
+  id?: string;
+  of?: string;
+  status?: PaymentStatus;
+  /** EVM payments: the EIP-3009 nonce and expiry, to check on-chain whether it was ever used. */
+  nonce?: string;
+  validBefore?: number;
+  /** What the server said it charged, for the record only. */
+  reported?: number | null;
+};
+/** signed: sent, outcome not known (or the request died) · ok: the server answered 2xx ·
+ *  failed: it answered with an error · refused: it refused the payment itself ·
+ *  aborted: signed but never sent, because another process had used the budget meanwhile. */
+export type PaymentStatus = "signed" | "ok" | "failed" | "refused" | "aborted";
 export type Approval = { kind: SpendEntry["kind"]; what: string; usd: number; network: Net; detail?: string };
 
 export type WafermapOptions = {
@@ -55,6 +81,39 @@ export class WafermapError extends Error {
 }
 
 const CHAINS = { robinhood, base, arbitrum, polygon } as const;
+const AUTH_STATE_ABI = [{ type: "function", name: "authorizationState", stateMutability: "view", inputs: [{ name: "authorizer", type: "address" }, { name: "nonce", type: "bytes32" }], outputs: [{ type: "bool" }] }] as const;
+
+/** One row per payment: the signed line joined with its outcome line. Old single lines pass through. */
+export function mergeLog(entries: SpendEntry[]): SpendEntry[] {
+  const outcomes = new Map(entries.filter((e) => e.of).map((e) => [e.of!, e]));
+  return entries
+    .filter((e) => !e.of)
+    .map((e) => {
+      const o = e.id ? outcomes.get(e.id) : undefined;
+      if (!o) return e;
+      return { ...e, status: o.status, tx: o.tx ?? e.tx, reported: o.reported ?? null, ...(o.status === "aborted" ? { usd: 0 } : {}) };
+    });
+}
+
+/**
+ * Was a signed payment ever executed? Reads the token contract (EIP-3009 authorizationState),
+ * so the answer does not depend on any server and needs no key. "unused" after expiry means it
+ * can never be charged. Solana payments and old log lines without a nonce come back "unknown"; an RPC
+ * failure comes back "error".
+ */
+export async function checkPayment(e: Pick<SpendEntry, "network" | "payer" | "nonce" | "validBefore">, rpc?: string): Promise<"used" | "unused" | "pending" | "unknown" | "error"> {
+  if (e.network === "solana" || !e.nonce || !(e.network in CHAINS)) return "unknown";
+  const chain = PAY_CHAINS.find((c) => c.key === e.network)!;
+  try {
+    const client = createPublicClient({ chain: CHAINS[e.network as EvmNet], transport: http(rpc) });
+    const used = await client.readContract({ address: chain.stable as Hex, abi: AUTH_STATE_ABI, functionName: "authorizationState", args: [e.payer as Hex, e.nonce as Hex] });
+    if (used) return "used";
+    return e.validBefore && Date.now() / 1000 > e.validBefore ? "unused" : "pending";
+  } catch {
+    return "error"; // the RPC could not answer: the payment may or may not have been executed
+  }
+}
+
 export const DEFAULT_LIMITS: Limits = { perPayment: 0.1, perDay: 1, perSwap: 25 };
 
 export class Wafermap {
@@ -94,7 +153,9 @@ export class Wafermap {
     return (this.clients[n] ??= createPublicClient({ chain: CHAINS[n], transport: http(this.rpc[n]) }) as PublicClient);
   }
 
-  /** USD spent today (local midnight) on payments, not counting swaps. */
+  /** USD signed today (local midnight) on payments, not counting swaps. Every signed payment
+   *  counts at its full amount, whatever the server answered, because a signed payment can be
+   *  executed until it expires. `checkPayment` shows on-chain which ones were never used. */
   spentToday(): number {
     const start = new Date();
     start.setHours(0, 0, 0, 0);
@@ -126,18 +187,68 @@ export class Wafermap {
     return new WafermapError("payment_rejected", `Payment refused (${reason}). Check that ${paid.req.chain.vm === "svm" ? this.solanaAddress : this.address} holds at least $${paid.req.usd} ${paid.req.chain.symbol} on ${paid.req.chain.name}.`);
   }
 
+  /** Write the signed payment to the ledger before it leaves the machine. */
+  private booked(kind: "resource" | "service", what: string, s: Signed): string {
+    const id = crypto.randomUUID();
+    this.ledger.record({ at: Date.now(), kind, what, usd: s.req.usd, network: s.req.chain.key, tx: null, payer: s.from, id, status: "signed", ...(s.auth ? { nonce: s.auth.nonce, validBefore: s.auth.validBefore } : {}) });
+    return id;
+  }
+
+  /** The outcome line for a booked payment. It adds nothing to the daily total. */
+  private outcome(id: string, kind: "resource" | "service", what: string, s: Signed, status: PaymentStatus, tx: string | null, reported: number | null = null) {
+    this.ledger.record({ at: Date.now(), kind, what, usd: 0, network: s.req.chain.key, tx, payer: s.from, of: id, status, reported });
+  }
+
+  // Check-sign-book runs one payment at a time in this process, so two calls started together
+  // cannot both pass the daily cap on the same remaining budget. Across processes, see onSigned.
+  private queue: Promise<void> = Promise.resolve();
+  private acquire(): Promise<() => void> {
+    let release!: () => void;
+    const held = new Promise<void>((r) => (release = r));
+    const prev = this.queue;
+    this.queue = prev.then(() => held);
+    return prev.then(() => release);
+  }
+
   private async paidFetch(kind: "resource" | "service", what: string, url: string, init: RequestInit, network?: Net) {
+    let id: string | null = null;
+    let release: (() => void) | null = null;
+    const unlock = () => {
+      release?.();
+      release = null;
+    };
     try {
-      return await x402fetch(url, init, {
+      const r = await x402fetch(url, init, {
         signer: this.account as any,
         solana: this.solana ?? undefined,
         prefer: this.prefer(network),
-        approve: (req: Requirement) => this.gate({ kind, what, usd: req.usd, network: req.chain.key, detail: `${req.chain.symbol} to ${req.payTo}` }),
+        approve: async (req) => {
+          release = await this.acquire();
+          await this.gate({ kind, what, usd: req.usd, network: req.chain.key, detail: `${req.chain.symbol} to ${req.payTo}` });
+        },
+        onSigned: (s) => {
+          id = this.booked(kind, what, s);
+          unlock();
+          // The queue serialises this process only. Another process using the same ledger (a second
+          // MCP client, or the CLI next to the MCP server) may have booked since our check. Re-read
+          // the shared total now that ours is in it: if the cap is passed, the signed payment is
+          // dropped here, never sent, and its booking reversed. Two racing processes can both drop;
+          // neither can both send.
+          if (this.spentToday() > this.limits.perDay + 1e-9) {
+            this.ledger.record({ at: Date.now(), kind, what, usd: -s.req.usd, network: s.req.chain.key, tx: null, payer: s.from, of: id, status: "aborted" });
+            id = null;
+            throw new WafermapError("over_daily_cap", `Another payment from this wallet used the daily cap of $${this.limits.perDay} at the same time. Nothing was sent.`);
+          }
+        },
       });
+      return { ...r, id: id as string | null };
     } catch (e: any) {
+      // Signed but no answer: the payment stays counted (status "signed"); nothing more to write.
       if (e instanceof WafermapError) throw e;
       if (e instanceof X402Error) throw new WafermapError(e.code, e.message);
       throw new WafermapError("network_error", `${new URL(url).host}: ${e?.cause?.message ?? e?.message ?? "request failed"}`);
+    } finally {
+      unlock();
     }
   }
 
@@ -150,18 +261,28 @@ export class Wafermap {
 
   async call(id: string, input: Record<string, unknown> = {}, o: { network?: Net } = {}) {
     const go = () => this.paidFetch("resource", id, `${this.baseUrl}/v1/${id}`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(input) }, o.network);
-    let { res, paid } = await go();
-    let out: any = await res.json().catch(() => ({}));
+    const settle = (r: Awaited<ReturnType<typeof go>>, out: any) => {
+      if (!r.paid || !r.id) return;
+      const status: PaymentStatus = r.res.status === 402 ? "refused" : r.res.ok ? "ok" : "failed";
+      this.outcome(r.id, "resource", id, r.paid, status, out?.receipt?.tx ?? r.paid.tx, typeof out?.receipt?.amountUsd === "number" ? out.receipt.amountUsd : null);
+    };
+    let r = await go();
+    let out: any = await r.res.json().catch(() => ({}));
+    settle(r, out);
     // The facilitator rotates its Solana fee payers; a quote that named one just rotated out is
-    // refused before anything moves. Ask for a fresh quote once.
-    if (paid?.req.chain.vm === "svm" && res.status === 402 && /fee_payer/i.test(JSON.stringify(out))) {
-      ({ res, paid } = await go());
-      out = await res.json().catch(() => ({}));
+    // refused before anything moves. Ask for a fresh quote once. (The refused one stays counted.)
+    if (r.paid?.req.chain.vm === "svm" && r.res.status === 402 && /fee_payer/i.test(JSON.stringify(out))) {
+      r = await go().catch((e) => {
+        if (e?.code === "over_daily_cap") throw new WafermapError("over_daily_cap", `The facilitator refused the first Solana payment (its fee payer rotated). That signed payment still counts until it expires, and a second one would pass the daily cap of $${this.limits.perDay}. Try again in a few minutes or pay on another network.`);
+        throw e;
+      });
+      out = await r.res.json().catch(() => ({}));
+      settle(r, out);
     }
+    const { res, paid } = r;
     const refused = this.rejected(res, out, paid);
     if (refused) throw refused;
     if (!res.ok) throw new WafermapError(out?.error?.code ?? "http_error", out?.error?.message ?? (typeof out?.error === "string" ? out.error : `HTTP ${res.status}`));
-    if (paid && out.receipt) this.ledger.record({ at: Date.now(), kind: "resource", what: id, usd: out.receipt.amountUsd, network: paid.req.chain.key, tx: out.receipt.tx, payer: paid.from });
     return out as { resource: string; result: any; receipt: { network: string; asset: string; amountUsd: number; payer: string; tx: string; ms: number } | null };
   }
 
@@ -181,12 +302,13 @@ export class Wafermap {
     const target = qs ? `${url}${url.includes("?") ? "&" : "?"}${qs}` : url;
     const init: RequestInit = method === "GET" ? { method } : { method, headers: { "content-type": "application/json" }, body: JSON.stringify(o.input ?? {}) };
     const u = new URL(url);
-    const { res, paid } = await this.paidFetch("service", `${u.host}${u.pathname}`, target, init, o.network);
+    const what = `${u.host}${u.pathname}`;
+    const { res, paid, id } = await this.paidFetch("service", what, target, init, o.network);
+    if (paid && id) this.outcome(id, "service", what, paid, res.status === 402 ? "refused" : res.ok ? "ok" : "failed", paid.tx);
     const type = res.headers.get("content-type") ?? "";
-    const result = /json/.test(type) ? await res.json().catch(() => null) : /^(image|audio|video)\//.test(type) ? { bytes: (await res.arrayBuffer()).byteLength, contentType: type } : await res.text();
+    const result = /json/.test(type) ? await res.json().catch(() => null) : /^(image|audio|video)\//.test(type) ? { bytes: (await res.arrayBuffer().catch(() => new ArrayBuffer(0))).byteLength, contentType: type } : await res.text().catch(() => "");
     const refused = this.rejected(res, result, paid);
     if (refused) throw refused;
-    if (paid) this.ledger.record({ at: Date.now(), kind: "service", what: `${u.host}${u.pathname}`, usd: res.ok ? paid.req.usd : 0, network: paid.req.chain.key, tx: paid.tx, payer: paid.from });
     if (!res.ok) throw new WafermapError(paid ? "payment_failed" : "http_error", `${u.host} answered ${res.status}: ${JSON.stringify(result).slice(0, 300)}`);
     return { status: res.status, result, paid: paid ? { usd: paid.req.usd, network: paid.req.chain.key, tx: paid.tx } : null };
   }

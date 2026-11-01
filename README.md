@@ -15,6 +15,8 @@ npm i -g https://wafermap.xyz/cli/wafermap.tgz
 wafermap init
 ```
 
+Install only from wafermap.xyz or from this repository. `npm i -g wafermap` (the bare registry name) is **not** this package.
+
 `init` creates a key and encrypts it with your password (scrypt + AES-256-GCM) in `~/.wafermap/keystore.json`. Back it up with `wafermap export-key`. Then send a few dollars of USDC on Solana to the Solana address it prints, or USDG (Robinhood Chain) or USDC (Base, Arbitrum, Polygon) to its EVM address.
 
 The Solana address comes from the same key (derived with HMAC-SHA256), so one backup covers both. `wafermap export-key --solana` prints the Solana secret key in the form Phantom and Solflare import. `wafermap address` shows both addresses.
@@ -73,16 +75,21 @@ Pass `approve: (a) => boolean` to confirm each payment or swap yourself, and `le
 
 ## Where the limits live
 
-The caps sit with the key, on your machine. Before the wallet signs anything it reads the 402 quote and refuses when the price is above the per-payment cap or would take today's spend past the daily cap, so nothing is signed and nothing can be charged. With `--mcp-confirm on`, you also approve each MCP payment yourself before it is signed. Wafermap's server only quotes, verifies the signature, runs the resource and settles if it worked; it never sees your key or your caps. A budget written in a prompt is an instruction, not a limit: set it with `wafermap limits`. More: https://wafermap.xyz/docs#limits
+The caps sit with the key, on your machine. Before the wallet signs anything it reads the 402 quote and refuses when the price is above the per-payment cap or would take today's spend past the daily cap, so nothing is signed and nothing can be charged. With `--mcp-confirm on`, you also approve each MCP payment yourself before it is signed. A budget written in a prompt is an instruction, not a limit: set it with `wafermap limits`. More: https://wafermap.xyz/docs#limits
 
-The checks are in [`src/core.ts`](src/core.ts) (`gate`), the keystore in [`src/store.ts`](src/store.ts), payment signing in [`shared/x402client.ts`](shared/x402client.ts) and [`shared/solana.ts`](shared/solana.ts).
+**The daily cap counts what the wallet signed, not what a server says it charged.** Every payment is written to `spend.jsonl` at its full signed amount the moment it is signed, before it is sent, and stays counted whatever the server answers: an error, a receipt saying $0, no receipt, or no answer at all. Check, sign and record run one payment at a time within a process, so calls started together cannot share the same remaining budget. Across processes on the same wallet (two MCP clients, or the CLI next to the MCP server), the wallet re-reads the shared log right after recording a signed payment and, if the cap is now passed, drops that payment before it is sent. (Before 0.3.3 the cap trusted the server's receipt; see [CHANGELOG.md](CHANGELOG.md).)
+
+**What the wallet cannot enforce.** An x402 `exact` payment is a signed authorization (EIP-3009 on EVM chains, a partially signed transaction on Solana). Whoever receives it can execute it once until it expires (at most 300 seconds, often less). "A failed call costs $0" is therefore a promise of the server you pay: Wafermap's server settles only after the resource worked and otherwise lets the authorization expire unused. You do not have to take that on trust: `wafermap history --verify` asks each token contract (`authorizationState`) whether every signed payment was executed, and shows the ones that expired unused (`error` means the RPC did not answer). Solana payments are not checked yet. The caps bound the worst case either way.
+
+The checks are in [`src/core.ts`](src/core.ts) (`gate`, `paidFetch`, `checkPayment`), the keystore in [`src/store.ts`](src/store.ts), payment signing in [`shared/x402client.ts`](shared/x402client.ts) and [`shared/solana.ts`](shared/solana.ts). The tests in [`test/caps.test.mjs`](test/caps.test.mjs) run the caps against a local server that lies.
 
 ## Build from source
 
 ```bash
 git clone https://github.com/wafermap/wafermap-cli.git && cd wafermap-cli
 npm ci
-npm run build          # dist/cli.js, dist/index.js and type declarations
+npm run build          # dist/cli.js, dist/index.js and type declarations (strict tsc)
+npm test               # the caps against a mock server that misbehaves
 node dist/cli.js --help
 npm i -g .             # optional: install this build as `wafermap`
 ```

@@ -129,7 +129,7 @@ const randomNonce = (): Hex => ("0x" + [...crypto.getRandomValues(new Uint8Array
 
 /** Sign the payment for the exact amount and return the header to send: an EIP-3009 transfer on
  *  EVM chains, a partially signed USDC transfer transaction on Solana. */
-export async function signPayment(signer: Signer, req: Requirement, resource: any, solana?: SolanaPayer): Promise<{ name: string; value: string }> {
+export async function signPayment(signer: Signer, req: Requirement, resource: any, solana?: SolanaPayer): Promise<{ name: string; value: string; auth?: SignedAuth }> {
   if (req.chain.vm === "svm") {
     if (!solana) throw new X402Error("no_solana_wallet", "This payment is on Solana and no Solana wallet was given.");
     let transaction: string;
@@ -151,8 +151,9 @@ export async function signPayment(signer: Signer, req: Requirement, resource: an
     throw new X402Error("sign_rejected", e?.shortMessage ?? e?.message ?? "Signature rejected.");
   }
   const authorization = { from: signer.address, to: req.payTo, value: req.amount, validAfter: "0", validBefore: validBefore.toString(), nonce };
-  if (req.version === 1) return { name: "X-PAYMENT", value: b64encode(JSON.stringify({ x402Version: 1, scheme: "exact", network: req.raw.network, payload: { signature, authorization } })) };
-  return { name: "PAYMENT-SIGNATURE", value: b64encode(JSON.stringify({ x402Version: 2, resource, accepted: req.raw, payload: { signature, authorization } })) };
+  const auth = { nonce, validBefore: Number(validBefore) };
+  if (req.version === 1) return { name: "X-PAYMENT", value: b64encode(JSON.stringify({ x402Version: 1, scheme: "exact", network: req.raw.network, payload: { signature, authorization } })), auth };
+  return { name: "PAYMENT-SIGNATURE", value: b64encode(JSON.stringify({ x402Version: 2, resource, accepted: req.raw, payload: { signature, authorization } })), auth };
 }
 
 /** Settlement details a server returns after a paid call, when it sends them. */
@@ -167,16 +168,23 @@ export function readSettlement(res: Response): { tx?: string; network?: string; 
   }
 }
 
-export type PaidCall = { res: Response; paid: { req: Requirement; from: string; tx: string | null } | null };
+/** What an EVM payment authorized on-chain: anyone holding it can execute it until `validBefore`
+ *  (unix seconds), once. `authorizationState(from, nonce)` on the token says whether it was used. */
+export type SignedAuth = { nonce: Hex; validBefore: number };
+export type Signed = { req: Requirement; from: string; auth?: SignedAuth };
+export type PaidCall = { res: Response; paid: (Signed & { tx: string | null }) | null };
 
 /**
  * Fetch an x402 resource, paying once when it answers 402.
  * `approve` sees the chosen requirement before anything is signed; throw to stop.
+ * `onSigned` runs once the payment is signed and before it is sent: from then on the payment
+ * can be executed whatever the server answers (or if it never answers), so a spend limit has to
+ * count it here, at its full amount, not from what the server reports back.
  */
 export async function x402fetch(
   url: string,
   init: RequestInit,
-  opts: { signer: Signer | (() => Promise<Signer>); solana?: SolanaPayer; prefer?: ChainKey[]; approve?: (req: Requirement) => Promise<void> | void; fetch?: typeof fetch },
+  opts: { signer: Signer | (() => Promise<Signer>); solana?: SolanaPayer; prefer?: ChainKey[]; approve?: (req: Requirement) => Promise<void> | void; onSigned?: (s: Signed) => void; fetch?: typeof fetch },
 ): Promise<PaidCall> {
   const f = opts.fetch ?? fetch;
   const first = await f(url, init);
@@ -189,8 +197,10 @@ export async function x402fetch(
   const svm = req.chain.vm === "svm";
   const signer = svm ? null : typeof opts.signer === "function" ? await opts.signer() : opts.signer;
   const header = await signPayment(signer!, req, quote.resource, opts.solana);
+  const signed: Signed = { req, from: svm ? opts.solana!.address : signer!.address, ...(header.auth ? { auth: header.auth } : {}) };
+  opts.onSigned?.(signed);
   const headers = new Headers(init.headers);
   headers.set(header.name, header.value);
   const res = await f(url, { ...init, headers });
-  return { res, paid: { req, from: svm ? opts.solana!.address : signer!.address, tx: readSettlement(res)?.tx ?? null } };
+  return { res, paid: { ...signed, tx: readSettlement(res)?.tx ?? null } };
 }

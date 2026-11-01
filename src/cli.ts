@@ -3,7 +3,7 @@
 import { createInterface } from "node:readline";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { PAY_NETWORKS, payNetworkOf } from "../shared/catalog";
-import { NETS, WafermapError, isNet, type Approval, type Net } from "./core.js";
+import { NETS, WafermapError, checkPayment, isNet, mergeLog, type Approval, type Net } from "./core.js";
 import { openWallet } from "./local.js";
 import { solanaKeyFromEvm } from "../shared/solana";
 import { HOME, config, hasWallet, keystoreAddress, keystoreSolana, loadKey, rememberSolana, saveConfig, saveKey, spendLog } from "./store.js";
@@ -16,7 +16,7 @@ Wallet
   wafermap address                      print the wallet addresses (EVM and Solana)
   wafermap balance                      USDG / USDC and gas on every payment network
   wafermap limits [--per-payment 0.1] [--per-day 1] [--per-swap 25] [--network <net>] [--mcp-swaps on|off] [--mcp-confirm on|off]
-  wafermap history [--days 7]           payments and swaps from this machine
+  wafermap history [--days 7] [--verify]  payments and swaps from this machine; --verify checks on-chain
   wafermap export-key [--solana]        print the private key, or the Solana key for Phantom/Solflare
 
 Pay
@@ -197,11 +197,25 @@ async function main() {
     case "history": {
       const days = Number(a.flags.days ?? 7);
       const since = Date.now() - days * 86400_000;
-      const rows = spendLog().filter((e) => e.at >= since);
+      const rows = mergeLog(spendLog()).filter((e) => e.at >= since).reverse(); // newest first
       if (!rows.length) return console.log(`Nothing in the last ${days} days.`);
-      for (const e of rows.reverse()) console.log(`${new Date(e.at).toISOString().slice(0, 16).replace("T", " ")}  ${e.kind.padEnd(8)}  ${e.kind === "swap" ? "      " : `$${e.usd}`.padEnd(8)}  ${e.network.padEnd(9)}  ${e.what}${e.tx ? `  ${EXPLORER(e.network)}/tx/${e.tx}` : ""}`);
-      const total = rows.filter((e) => e.kind !== "swap").reduce((s, e) => s + e.usd, 0);
-      return console.log(`\nSpent $${total.toFixed(4)} on ${rows.filter((e) => e.kind !== "swap").length} payments.`);
+      // --verify asks each token contract whether the signed payment was ever executed.
+      const verify = a.flags.verify !== undefined;
+      const RPC: Partial<Record<Net, string | undefined>> = { robinhood: process.env.WAFERMAP_RPC_ROBINHOOD, base: process.env.WAFERMAP_RPC_BASE, arbitrum: process.env.WAFERMAP_RPC_ARBITRUM, polygon: process.env.WAFERMAP_RPC_POLYGON };
+      const chain = verify ? await Promise.all(rows.map((e) => (e.kind === "swap" ? null : checkPayment(e, RPC[e.network])))) : [];
+      rows.forEach((e, i) => {
+        const state = [e.status, chain[i] ? `on-chain: ${chain[i]}` : null].filter(Boolean).join(", ");
+        console.log(`${new Date(e.at).toISOString().slice(0, 16).replace("T", " ")}  ${e.kind.padEnd(8)}  ${e.kind === "swap" ? "      " : `$${e.usd}`.padEnd(8)}  ${e.network.padEnd(9)}  ${e.what}${state ? `  [${state}]` : ""}${e.tx ? `  ${EXPLORER(e.network)}/tx/${e.tx}` : ""}`);
+      });
+      const pays = rows.filter((e) => e.kind !== "swap");
+      const total = pays.reduce((s, e) => s + e.usd, 0);
+      console.log(`
+Total $${total.toFixed(4)} in ${pays.length} payments. From 0.3.3 every payment counts at its full signed amount; older lines show what the server reported.`);
+      if (verify) {
+        const never = rows.filter((e, i) => e.kind !== "swap" && chain[i] === "unused").reduce((s, e) => s + e.usd, 0);
+        console.log(`On-chain: $${never.toFixed(4)} of that was signed but never executed and has expired. "unknown" = Solana or an older log line; "error" = the RPC did not answer, try again.`);
+      } else console.log("Add --verify to check on-chain which signed payments were executed.");
+      return;
     }
 
     case "resources": {
