@@ -39,19 +39,26 @@ Add `--yes` to skip the confirmation prompt (caps still apply), `--network base`
 
 ## MCP server
 
-Give Claude Desktop, Cursor or any MCP client the same wallet:
+Give Claude Desktop, Cursor or any MCP client the same wallet. First put the wallet password in your operating system's keychain, once, in a terminal:
+
+```bash
+wafermap keychain on
+```
+
+Then the client config holds no secret:
 
 ```json
 {
   "mcpServers": {
     "wafermap": {
       "command": "wafermap",
-      "args": ["mcp"],
-      "env": { "WAFERMAP_PASSWORD": "your wallet password" }
+      "args": ["mcp"]
     }
   }
 }
 ```
+
+`wafermap keychain on` stores the password with Windows DPAPI (a file only your Windows user can decrypt), in the macOS Keychain, or in the Secret Service on Linux (GNOME Keyring, KWallet, through `secret-tool`). `wafermap keychain` shows whether it is set and still unlocks the wallet; `wafermap keychain off` removes it. This keeps the password out of config files, backups and screenshots. It does not stop a program already running as you, which could also ask the OS for it. Setting `WAFERMAP_PASSWORD` in the client's `env` still works, but the password then sits in plain text in that config file, and the server says so when it starts.
 
 Tools: `wafermap_wallet`, `wafermap_resources`, `wafermap_call`, `wafermap_discover`, `wafermap_pay`, `wafermap_swap_quote`, `wafermap_swap`, `wafermap_history`. Swaps from MCP are off until you run `wafermap limits --mcp-swaps on`.
 
@@ -79,9 +86,13 @@ The caps sit with the key, on your machine. Before the wallet signs anything it 
 
 **The daily cap counts what the wallet signed, not what a server says it charged.** Every payment is written to `spend.jsonl` at its full signed amount the moment it is signed, before it is sent, and stays counted whatever the server answers: an error, a receipt saying $0, no receipt, or no answer at all. Check, sign and record run one payment at a time within a process, so calls started together cannot share the same remaining budget. Across processes on the same wallet (two MCP clients, or the CLI next to the MCP server), the wallet re-reads the shared log right after recording a signed payment and, if the cap is now passed, drops that payment before it is sent. (Before 0.3.3 the cap trusted the server's receipt; see [CHANGELOG.md](CHANGELOG.md).)
 
-**What the wallet cannot enforce.** An x402 `exact` payment is a signed authorization (EIP-3009 on EVM chains, a partially signed transaction on Solana). Whoever receives it can execute it once until it expires (at most 300 seconds, often less). "A failed call costs $0" is therefore a promise of the server you pay: Wafermap's server settles only after the resource worked and otherwise lets the authorization expire unused. You do not have to take that on trust: `wafermap history --verify` asks each token contract (`authorizationState`) whether every signed payment was executed, and shows the ones that expired unused (`error` means the RPC did not answer). Solana payments are not checked yet. The caps bound the worst case either way.
+**What the wallet cannot enforce.** An x402 `exact` payment is a signed authorization (EIP-3009 on EVM chains, a partially signed transaction on Solana). Whoever receives it can execute it once until it expires. The wallet signs EVM authorizations for at most 90 seconds, or less when the server asks for less (300 before 0.4.0). "A failed call costs $0" is therefore a promise of the server you pay: Wafermap's server settles only after the resource worked and otherwise lets the authorization expire unused. You do not have to take that on trust: `wafermap history --verify` asks each token contract (`authorizationState`) whether every signed payment was executed, and shows the ones that expired unused (`error` means the RPC did not answer). Solana payments are not checked yet. The caps bound the worst case either way.
 
-The checks are in [`src/core.ts`](src/core.ts) (`gate`, `paidFetch`, `checkPayment`), the keystore in [`src/store.ts`](src/store.ts), payment signing in [`shared/x402client.ts`](shared/x402client.ts) and [`shared/solana.ts`](shared/solana.ts). The tests in [`test/caps.test.mjs`](test/caps.test.mjs) run the caps against a local server that lies.
+**Time limits.** Requests to paid resources and services, to Wafermap's API, to the swap API and to Solana RPC give up after 60 seconds (`timeoutMs` in the SDK); EVM RPC calls keep viem's own time-outs. A paid call that times out after the payment was signed says so: the payment stays counted, and for EVM payments the message says until when it can be executed.
+
+**Swaps.** The wallet builds the swap, checks it, and only then approves and sends. The swap must go to KyberSwap's router (`0x6131B5fae19EA4f9D964eAc0408E4408b66337b5` on Robinhood Chain and Base). The calldata itself is decoded and must trade the quoted tokens, spend exactly the quoted amount, send the output to this wallet, take no fee, and carry an on-chain minimum output of the built output less your slippage, where the built output must be within your slippage of the quote. ETH is sent only when selling ETH, and an ERC-20 approval is for exactly the amount, to that router, and only when the allowance is lower. The router and the route it executes are KyberSwap's: the wallet checks what the call asks for, not what the router contract does.
+
+The checks are in [`src/core.ts`](src/core.ts) (`gate`, `paidFetch`, `checkPayment`), the keystore in [`src/store.ts`](src/store.ts), payment signing in [`shared/x402client.ts`](shared/x402client.ts) and [`shared/solana.ts`](shared/solana.ts). The tests in [`test/caps.test.mjs`](test/caps.test.mjs) run the caps against a local server that lies; [`test/hardening.test.mjs`](test/hardening.test.mjs) covers expiry, time limits, swap checks and the keychain (real DPAPI on Windows; on macOS and Linux the `security` and `secret-tool` calls run against a stub, not a real keychain). CI runs them on Linux, Windows and macOS.
 
 ## Build from source
 

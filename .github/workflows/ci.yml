@@ -6,10 +6,17 @@ permissions:
   contents: read
 jobs:
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ matrix.os }}
     strategy:
       matrix:
+        os: [ubuntu-latest]
         node: [20, 22]
+        # the MCP password store differs per OS (DPAPI, Keychain, Secret Service)
+        include:
+          - os: windows-latest
+            node: 22
+          - os: macos-latest
+            node: 22
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -22,4 +29,5 @@ jobs:
       - run: npm test
       # The shipped tarball is built from this repo: print its checksum so anyone can compare it with
       # https://wafermap.xyz/cli/wafermap-<version>.tgz
-      - run: npm pack --silent && sha256sum wafermap-*.tgz
+      - run: npm pack --silent
+      - run: node -e "const f=require('fs').readdirSync('.').find(x=>/^wafermap-.*\.tgz$/.test(x));console.log(require('crypto').createHash('sha256').update(require('fs').readFileSync(f)).digest('hex'),f)"

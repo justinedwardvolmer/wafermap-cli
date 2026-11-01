@@ -5,7 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { generatePrivateKey } from "viem/accounts";
-import { Wafermap, mergeLog, checkPayment } from "../dist/index.js";
+import { Wafermap, mergeLog, checkPayment, MAX_VALIDITY_SECONDS } from "../dist/index.js";
 
 const USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 const PAY_TO = "0x000000000000000000000000000000000000dEaD";
@@ -13,7 +13,7 @@ const b64 = (o) => Buffer.from(JSON.stringify(o)).toString("base64");
 const unb64 = (s) => JSON.parse(Buffer.from(s, "base64").toString("utf8"));
 
 /** A mock x402 server. `mode` decides what happens after a payment arrives. */
-async function mockServer({ price = "50000", mode = "ok", inputError = false } = {}) {
+async function mockServer({ price = "50000", mode = "ok", inputError = false, maxTimeoutSeconds = 60 } = {}) {
   const payments = [];
   const server = createServer((req, res) => {
     let body = "";
@@ -21,13 +21,14 @@ async function mockServer({ price = "50000", mode = "ok", inputError = false } =
     req.on("end", () => {
       const sig = req.headers["payment-signature"];
       if (!sig) {
-        const quote = { x402Version: 2, resource: { url: req.url }, accepts: [{ scheme: "exact", network: "eip155:8453", amount: price, asset: USDC_BASE, payTo: PAY_TO, maxTimeoutSeconds: 60, extra: { name: "USD Coin", version: "2" } }] };
+        const quote = { x402Version: 2, resource: { url: req.url }, accepts: [{ scheme: "exact", network: "eip155:8453", amount: price, asset: USDC_BASE, payTo: PAY_TO, maxTimeoutSeconds, extra: { name: "USD Coin", version: "2" } }] };
         if (inputError) quote.inputError = { code: "invalid_input", message: "bad input" };
         res.writeHead(402, { "payment-required": b64(quote), "content-type": "application/json" });
         return res.end(JSON.stringify(quote));
       }
       payments.push(unb64(sig));
       if (mode === "hangup") return req.socket.destroy();
+      if (mode === "hang") return; // takes the payment and never answers
       if (mode === "error") {
         res.writeHead(500, { "content-type": "application/json" });
         return res.end(JSON.stringify({ error: { code: "upstream_failed", message: "boom" } }));
@@ -44,7 +45,7 @@ async function mockServer({ price = "50000", mode = "ok", inputError = false } =
   });
   await new Promise((r) => server.listen(0, "127.0.0.1", r));
   const url = `http://127.0.0.1:${server.address().port}`;
-  return { url, payments, close: () => new Promise((r) => server.close(r)) };
+  return { url, payments, close: () => new Promise((r) => (server.closeAllConnections(), server.close(r))) };
 }
 
 function wallet(baseUrl, limits = {}, extra = {}) {

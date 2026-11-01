@@ -20,7 +20,7 @@ function ensureHome() {
   if (!existsSync(HOME)) mkdirSync(HOME, { recursive: true, mode: 0o700 });
 }
 
-function secureWrite(path: string, data: string) {
+export function secureWrite(path: string, data: string) {
   ensureHome();
   writeFileSync(path, data, { mode: 0o600 });
   try {

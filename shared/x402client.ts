@@ -125,6 +125,11 @@ const TYPES = {
   ],
 } as const;
 
+/** The longest an EVM payment authorization stays valid, whatever the server allows. Whoever receives
+ *  a signed payment can execute it until then, so this bounds how long "failed calls cost $0" rests on
+ *  the server's word. Long enough for a slow resource plus settlement (Wafermap needs at least 60 s). */
+export const MAX_VALIDITY_SECONDS = 90;
+
 const randomNonce = (): Hex => ("0x" + [...crypto.getRandomValues(new Uint8Array(32))].map((b) => b.toString(16).padStart(2, "0")).join("")) as Hex;
 
 /** Sign the payment for the exact amount and return the header to send: an EIP-3009 transfer on
@@ -136,13 +141,14 @@ export async function signPayment(signer: Signer, req: Requirement, resource: an
     try {
       transaction = await solanaPayment(solana, { amount: req.amount, payTo: req.payTo, asset: req.asset, feePayer: req.extra.feePayer!, memo: req.extra.memo });
     } catch (e: any) {
+      if (e?.name === "TimeoutError" || e?.cause?.name === "TimeoutError") throw e; // the caller reports time-outs
       throw new X402Error("sign_failed", e?.message ?? "Could not build the Solana payment.");
     }
     if (req.version === 1) return { name: "X-PAYMENT", value: b64encode(JSON.stringify({ x402Version: 1, scheme: "exact", network: req.raw.network, payload: { transaction } })) };
     return { name: "PAYMENT-SIGNATURE", value: b64encode(JSON.stringify({ x402Version: 2, resource, accepted: req.raw, payload: { transaction } })) };
   }
   const nonce = randomNonce();
-  const validBefore = BigInt(Math.floor(Date.now() / 1000) + Math.min(req.maxTimeoutSeconds, 300));
+  const validBefore = BigInt(Math.floor(Date.now() / 1000) + Math.min(req.maxTimeoutSeconds, MAX_VALIDITY_SECONDS));
   const message = { from: signer.address, to: req.payTo, value: BigInt(req.amount), validAfter: 0n, validBefore, nonce };
   let signature: Hex;
   try {

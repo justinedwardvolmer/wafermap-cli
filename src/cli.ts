@@ -4,6 +4,7 @@ import { createInterface } from "node:readline";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { PAY_NETWORKS, payNetworkOf } from "../shared/catalog";
 import { NETS, WafermapError, checkPayment, isNet, mergeLog, type Approval, type Net } from "./core.js";
+import { BACKEND_NAME, backend, keychainClear, keychainGet, keychainSet } from "./keychain.js";
 import { openWallet } from "./local.js";
 import { solanaKeyFromEvm } from "../shared/solana";
 import { HOME, config, hasWallet, keystoreAddress, keystoreSolana, loadKey, rememberSolana, saveConfig, saveKey, spendLog } from "./store.js";
@@ -18,6 +19,7 @@ Wallet
   wafermap limits [--per-payment 0.1] [--per-day 1] [--per-swap 25] [--network <net>] [--mcp-swaps on|off] [--mcp-confirm on|off]
   wafermap history [--days 7] [--verify]  payments and swaps from this machine; --verify checks on-chain
   wafermap export-key [--solana]        print the private key, or the Solana key for Phantom/Solflare
+  wafermap keychain [on|off]            keep the password for \`wafermap mcp\` in the OS keychain, not in plain text
 
 Pay
   wafermap resources [words]            Wafermap's pay-per-call catalog
@@ -29,7 +31,7 @@ Trade
   wafermap swap <amount> <from> <to>    swap through KyberSwap on robinhood or base, e.g. wafermap swap 0.01 ETH USDG
 
 Agents
-  wafermap mcp                          run as an MCP server (stdio); needs WAFERMAP_PASSWORD
+  wafermap mcp                          run as an MCP server (stdio); password from \`wafermap keychain on\` or WAFERMAP_PASSWORD
 
 Common flags: --network robinhood|solana|base|arbitrum|polygon   --yes (skip the confirmation)
 Files live in ${HOME}. Docs: https://wafermap.xyz/docs#cli`;
@@ -65,7 +67,7 @@ function ask(question: string, hidden = false): Promise<string> {
 }
 
 async function password(): Promise<string> {
-  return process.env.WAFERMAP_PASSWORD ?? (await ask("Wallet password: ", true));
+  return process.env.WAFERMAP_PASSWORD || (await ask("Wallet password: ", true));
 }
 
 const net = (v: unknown): Net | undefined => (isNet(v) ? v : v === undefined || v === true ? undefined : die(`--network must be one of ${NETS.join(", ")}`));
@@ -273,6 +275,33 @@ Total $${total.toFixed(4)} in ${pays.length} payments. From 0.3.3 every payment 
       if (!(slip > 0 && slip <= 5)) die("--slippage must be between 0 and 5 (percent)");
       const r = await wm.swap(q, { slippageBps: Math.round(slip * 100), step: (s) => console.error(`… ${s}`) });
       return console.log(`✓ Swapped · ${EXPLORER(q.network)}/tx/${r.tx}`);
+    }
+
+    case "keychain": {
+      const b = backend() ?? die(`No OS keychain support on ${process.platform}. Use WAFERMAP_PASSWORD.`);
+      const where = BACKEND_NAME[b];
+      const what = a._[0];
+      if (what === "on") {
+        const pw = await password();
+        loadKey(pw); // a wrong password stops here: nothing is stored
+        keychainSet(pw);
+        if (keychainGet() !== pw) die(`The ${where} did not give the password back. Nothing changed for \`wafermap mcp\`.`);
+        return console.log(`✓ The wallet password is in the ${where}. \`wafermap mcp\` reads it from there: remove WAFERMAP_PASSWORD from your MCP client's config and restart the client.`);
+      }
+      if (what === "off") {
+        keychainClear();
+        if (keychainGet() !== null) die(`The ${where} still holds the password. Remove the "wafermap" entry by hand.`);
+        return console.log(`✓ Removed from the ${where}. \`wafermap mcp\` needs WAFERMAP_PASSWORD again.`);
+      }
+      if (what !== undefined) die("Use: wafermap keychain [on|off]");
+      const pw = keychainGet();
+      if (!pw) return console.log(`Off. \`wafermap mcp\` reads WAFERMAP_PASSWORD. Run \`wafermap keychain on\` to keep it in the ${where}.`);
+      try {
+        loadKey(pw);
+      } catch {
+        die(`On (${where}), but it no longer unlocks the wallet. Run \`wafermap keychain on\` again.`);
+      }
+      return console.log(`On (${where}). It unlocks the wallet.`);
     }
 
     case "mcp": {

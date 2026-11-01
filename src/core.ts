@@ -69,6 +69,9 @@ export type WafermapOptions = {
   approve?: (a: Approval) => boolean | Promise<boolean>;
   /** RPC URLs per network. Solana defaults to `${baseUrl}/api/solana`. */
   rpc?: Partial<Record<Net, string>>;
+  /** Give up on any HTTP request (quote, paid call, discovery, swap API) after this long. Default 60000 ms.
+   *  A paid call that times out after signing stays counted until its authorization expires. */
+  timeoutMs?: number;
 };
 
 export class WafermapError extends Error {
@@ -115,6 +118,9 @@ export async function checkPayment(e: Pick<SpendEntry, "network" | "payer" | "no
 }
 
 export const DEFAULT_LIMITS: Limits = { perPayment: 0.1, perDay: 1, perSwap: 25 };
+export const DEFAULT_TIMEOUT_MS = 60_000;
+
+const timedOut = (e: any) => e?.name === "TimeoutError" || e?.cause?.name === "TimeoutError";
 
 export class Wafermap {
   readonly account: LocalAccount;
@@ -127,6 +133,9 @@ export class Wafermap {
   private clients: Partial<Record<EvmNet, PublicClient>> = {};
   readonly solana: SolanaPayer | null;
   readonly solanaAddress: string | null;
+  readonly timeoutMs: number;
+  /** fetch with this wallet's time limit: a server that never answers cannot hold a call forever. */
+  readonly fetch: typeof fetch;
 
   constructor(o: WafermapOptions) {
     const account = o.account ?? (o.privateKey ? privateKeyToAccount(o.privateKey) : null);
@@ -139,9 +148,11 @@ export class Wafermap {
     this.ledger = o.ledger ?? { entries: () => mem, record: (e) => void mem.push(e) };
     this.approveFn = o.approve;
     this.rpc = o.rpc ?? {};
+    this.timeoutMs = o.timeoutMs && o.timeoutMs > 0 ? o.timeoutMs : DEFAULT_TIMEOUT_MS;
+    this.fetch = (input, init) => fetch(input, { ...init, signal: init?.signal ?? AbortSignal.timeout(this.timeoutMs) });
     const sol = o.solana ?? (o.privateKey ? solanaKeyFromEvm(o.privateKey) : null);
     const solRpc = this.rpc.solana ?? `${this.baseUrl}/api/solana`;
-    this.solana = sol ? { address: sol.address, sign: sol.sign, blockhash: () => latestBlockhash(solRpc) } : null;
+    this.solana = sol ? { address: sol.address, sign: sol.sign, blockhash: () => latestBlockhash(solRpc, this.fetch) } : null;
     this.solanaAddress = sol?.address ?? o.solanaAddress ?? null;
   }
 
@@ -199,6 +210,22 @@ export class Wafermap {
     this.ledger.record({ at: Date.now(), kind, what, usd: 0, network: s.req.chain.key, tx, payer: s.from, of: id, status, reported });
   }
 
+  /** The timeout error for `host`, saying whether a payment was signed and until when it can be executed. */
+  private timeoutError(host: string, signed?: { validBefore?: number } | null) {
+    const after = signed ? ` A payment had been signed and sent. It stays counted${signed.validBefore ? ` and can only be executed until ${new Date(signed.validBefore * 1000).toLocaleTimeString()}` : ""}; check with \`wafermap history --verify\`.` : " Nothing was paid.";
+    return new WafermapError("timeout", `${host} did not answer within ${Math.round(this.timeoutMs / 1000)} s.${after}`);
+  }
+
+  /** Read a JSON body; a time-out while reading is reported, anything else gives `fallback`. */
+  private async body<T>(res: Response, read: () => Promise<T>, fallback: T, host: string, signed?: { validBefore?: number } | null): Promise<T> {
+    try {
+      return await read();
+    } catch (e) {
+      if (timedOut(e)) throw this.timeoutError(host, signed);
+      return fallback;
+    }
+  }
+
   // Check-sign-book runs one payment at a time in this process, so two calls started together
   // cannot both pass the daily cap on the same remaining budget. Across processes, see onSigned.
   private queue: Promise<void> = Promise.resolve();
@@ -222,6 +249,7 @@ export class Wafermap {
         signer: this.account as any,
         solana: this.solana ?? undefined,
         prefer: this.prefer(network),
+        fetch: this.fetch,
         approve: async (req) => {
           release = await this.acquire();
           await this.gate({ kind, what, usd: req.usd, network: req.chain.key, detail: `${req.chain.symbol} to ${req.payTo}` });
@@ -246,6 +274,7 @@ export class Wafermap {
       // Signed but no answer: the payment stays counted (status "signed"); nothing more to write.
       if (e instanceof WafermapError) throw e;
       if (e instanceof X402Error) throw new WafermapError(e.code, e.message);
+      if (timedOut(e)) throw this.timeoutError(new URL(url).host, id ? (this.ledger.entries().find((x) => x.id === id) ?? {}) : null);
       throw new WafermapError("network_error", `${new URL(url).host}: ${e?.cause?.message ?? e?.message ?? "request failed"}`);
     } finally {
       unlock();
@@ -255,8 +284,12 @@ export class Wafermap {
   // ---- Wafermap resources ----
 
   async resources(): Promise<any[]> {
-    const j: any = await fetch(`${this.baseUrl}/v1/resources`).then((r) => r.json());
-    return j.data ?? [];
+    const host = new URL(this.baseUrl).host;
+    const r = await this.fetch(`${this.baseUrl}/v1/resources`).catch((e) => {
+      throw timedOut(e) ? this.timeoutError(host) : new WafermapError("network_error", `${host}: ${e?.message ?? "request failed"}`);
+    });
+    const j: any = await this.body(r, () => r.json(), null, host);
+    return j?.data ?? [];
   }
 
   async call(id: string, input: Record<string, unknown> = {}, o: { network?: Net } = {}) {
@@ -266,8 +299,10 @@ export class Wafermap {
       const status: PaymentStatus = r.res.status === 402 ? "refused" : r.res.ok ? "ok" : "failed";
       this.outcome(r.id, "resource", id, r.paid, status, out?.receipt?.tx ?? r.paid.tx, typeof out?.receipt?.amountUsd === "number" ? out.receipt.amountUsd : null);
     };
+    const host = new URL(this.baseUrl).host;
+    const read = (r: Awaited<ReturnType<typeof go>>) => this.body(r.res, () => r.res.json(), {} as any, host, r.paid?.auth ?? (r.paid ? {} : null));
     let r = await go();
-    let out: any = await r.res.json().catch(() => ({}));
+    let out: any = await read(r);
     settle(r, out);
     // The facilitator rotates its Solana fee payers; a quote that named one just rotated out is
     // refused before anything moves. Ask for a fresh quote once. (The refused one stays counted.)
@@ -276,7 +311,7 @@ export class Wafermap {
         if (e?.code === "over_daily_cap") throw new WafermapError("over_daily_cap", `The facilitator refused the first Solana payment (its fee payer rotated). That signed payment still counts until it expires, and a second one would pass the daily cap of $${this.limits.perDay}. Try again in a few minutes or pay on another network.`);
         throw e;
       });
-      out = await r.res.json().catch(() => ({}));
+      out = await read(r);
       settle(r, out);
     }
     const { res, paid } = r;
@@ -289,9 +324,12 @@ export class Wafermap {
   // ---- Third-party x402 services ----
 
   async discover(query: string, limit = 10) {
-    const r = await fetch(`${this.baseUrl}/api/discover?q=${encodeURIComponent(query)}&limit=${limit}`);
-    const j: any = await r.json().catch(() => null);
-    if (!r.ok) throw new WafermapError(j?.error?.code ?? "discovery_failed", j?.error?.message ?? "Discovery is unavailable.");
+    const host = new URL(this.baseUrl).host;
+    const r = await this.fetch(`${this.baseUrl}/api/discover?q=${encodeURIComponent(query)}&limit=${limit}`).catch((e) => {
+      throw timedOut(e) ? this.timeoutError(host) : new WafermapError("network_error", `${host}: ${e?.message ?? "request failed"}`);
+    });
+    const j: any = await this.body(r, () => r.json(), null, host);
+    if (!r.ok || !Array.isArray(j?.services)) throw new WafermapError(j?.error?.code ?? "discovery_failed", j?.error?.message ?? "Discovery is unavailable.");
     return j.services as { url: string; method: string; name: string | null; description: string; priceUsd: number | null; networks: string[]; payable: boolean; input: unknown; outputExample: unknown }[];
   }
 
@@ -306,7 +344,8 @@ export class Wafermap {
     const { res, paid, id } = await this.paidFetch("service", what, target, init, o.network);
     if (paid && id) this.outcome(id, "service", what, paid, res.status === 402 ? "refused" : res.ok ? "ok" : "failed", paid.tx);
     const type = res.headers.get("content-type") ?? "";
-    const result = /json/.test(type) ? await res.json().catch(() => null) : /^(image|audio|video)\//.test(type) ? { bytes: (await res.arrayBuffer().catch(() => new ArrayBuffer(0))).byteLength, contentType: type } : await res.text().catch(() => "");
+    const signed = paid?.auth ?? (paid ? {} : null);
+    const result = /json/.test(type) ? await this.body(res, () => res.json(), null, u.host, signed) : /^(image|audio|video)\//.test(type) ? { bytes: (await this.body(res, () => res.arrayBuffer(), new ArrayBuffer(0), u.host, signed)).byteLength, contentType: type } : await this.body(res, () => res.text(), "", u.host, signed);
     const refused = this.rejected(res, result, paid);
     if (refused) throw refused;
     if (!res.ok) throw new WafermapError(paid ? "payment_failed" : "http_error", `${u.host} answered ${res.status}: ${JSON.stringify(result).slice(0, 300)}`);
@@ -320,7 +359,7 @@ export class Wafermap {
     const sol = this.solanaAddress;
     await Promise.all([
       sol
-        ? solanaBalances(this.rpc.solana ?? `${this.baseUrl}/api/solana`, sol).then(
+        ? solanaBalances(this.rpc.solana ?? `${this.baseUrl}/api/solana`, sol, this.fetch).then(
             (b) => void (out.solana = { eth: b.sol, gas: "SOL", stable: b.usdc, symbol: "USDC" }),
             () => {},
           )
@@ -344,7 +383,7 @@ export class Wafermap {
   private tokenCache: Partial<Record<SwapNet, Token[]>> = {};
   private async lookup(n: SwapNet, symbol: string) {
     if (!this.tokenCache[n]) {
-      const j: any = await fetch(`${this.baseUrl}/api/tokens?network=${n}`)
+      const j: any = await this.fetch(`${this.baseUrl}/api/tokens?network=${n}`)
         .then((r) => r.json())
         .catch(() => null);
       this.tokenCache[n] = j?.tokens ?? TOKENS[n];
@@ -359,7 +398,7 @@ export class Wafermap {
     const c = this.client(n) as any;
     try {
       const [tokenIn, tokenOut] = await Promise.all([resolveToken(n, from, c, (net, s) => this.lookup(net, s)), resolveToken(n, to, c, (net, s) => this.lookup(net, s))]);
-      return await quoteSwap({ network: n, tokenIn, tokenOut, amount });
+      return await quoteSwap({ network: n, tokenIn, tokenOut, amount, fetch: this.fetch });
     } catch (e: any) {
       throw new WafermapError(e?.code ?? "quote_failed", e?.shortMessage ?? e?.message ?? "No quote.");
     }
@@ -370,7 +409,7 @@ export class Wafermap {
     await this.gate({ kind: "swap", what: `${quote.amountIn} ${quote.tokenIn.symbol} → ${quote.tokenOut.symbol}`, usd: quote.amountInUsd, network: quote.network, detail: `about ${quote.amountOut} ${quote.tokenOut.symbol}` });
     const wallet = createWalletClient({ account: this.account, chain: CHAINS[quote.network], transport: http(this.rpc[quote.network]) });
     try {
-      const r = await executeSwap({ quote, wallet: wallet as any, client: this.client(quote.network) as any, slippageBps: o.slippageBps, step: o.step });
+      const r = await executeSwap({ quote, wallet: wallet as any, client: this.client(quote.network) as any, slippageBps: o.slippageBps, step: o.step, fetch: this.fetch });
       this.ledger.record({ at: Date.now(), kind: "swap", what: `${quote.amountIn} ${quote.tokenIn.symbol} → ${quote.tokenOut.symbol}`, usd: 0, network: quote.network, tx: r.tx, payer: this.address });
       return r;
     } catch (e: any) {

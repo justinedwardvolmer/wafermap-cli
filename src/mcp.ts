@@ -1,13 +1,15 @@
 // `wafermap mcp`: a stdio MCP server so Claude, Cursor and other MCP clients can use the local
 // Wafermap wallet. Payments stay inside the caps in ~/.wafermap/config.json. Swaps are off
 // unless you turn them on with `wafermap limits --mcp-swaps on`.
-// The keystore password comes from WAFERMAP_PASSWORD in the MCP client's config.
+// The keystore password comes from the OS keychain (`wafermap keychain on`), or from WAFERMAP_PASSWORD
+// in the MCP client's config, where it sits in plain text.
 // With `wafermap limits --mcp-confirm on`, every payment and swap also waits for the person to approve it
 // in the client (MCP elicitation); a client that cannot ask gets a refusal, never a silent payment.
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
 import { WafermapError, mergeLog, type Approval } from "./core.js";
+import { BACKEND_NAME, backend, keychainGet } from "./keychain.js";
 import { openWallet } from "./local.js";
 import { config, spendLog } from "./store.js";
 import { VERSION } from "./version.js";
@@ -68,11 +70,14 @@ for ${a.what}`;
 }
 
 export async function runMcp() {
-  const password = process.env.WAFERMAP_PASSWORD;
+  const fromEnv = process.env.WAFERMAP_PASSWORD || undefined;
+  const password = fromEnv ?? keychainGet();
   if (!password) {
-    process.stderr.write("Set WAFERMAP_PASSWORD in your MCP client's env for this server.\n");
+    process.stderr.write("No wallet password: run `wafermap keychain on` once in a terminal (recommended), or set WAFERMAP_PASSWORD in your MCP client's env.\n");
     process.exit(1);
   }
+  const store = backend();
+  if (fromEnv && store) process.stderr.write(`WAFERMAP_PASSWORD is set in plain text. Run \`wafermap keychain on\` to keep it in the ${BACKEND_NAME[store]} instead, then remove it from your MCP config.\n`);
   const server = new McpServer({ name: "wafermap", version: VERSION });
   const wm = openWallet(password, config().mcpConfirm ? (a) => confirmWithPerson(server, a) : undefined);
 
