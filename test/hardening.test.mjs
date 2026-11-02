@@ -4,13 +4,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { chmodSync, mkdtempSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { encodeFunctionData, parseAbi } from "viem";
-import { Wafermap, mergeLog, MAX_VALIDITY_SECONDS, quoteSwap, executeSwap, KYBER_ROUTER } from "../dist/index.js";
+import { Wafermap, listResources, mergeLog, MAX_VALIDITY_SECONDS, quoteSwap, executeSwap, KYBER_ROUTER } from "../dist/index.js";
 
 const USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 const PAY_TO = "0x000000000000000000000000000000000000dEaD";
@@ -242,6 +242,46 @@ test("call() names the paying wallet to Wafermap (X-Wafermap-Payer); pay() never
     await wm.pay(`${url}/third-party`);
     assert.equal(seen[0].payer, wm.address);
     assert.equal(seen[1].payer, null);
+  } finally {
+    await new Promise((r) => (s.closeAllConnections(), s.close(r)));
+  }
+});
+
+// ---- 0.4.3: `wafermap resources` has a time limit (third public review) ----
+
+test("wafermap resources: a catalog server that never answers gives up with `timeout`", async () => {
+  const s = createServer(() => {}); // accepts the connection, never answers
+  await new Promise((r) => s.listen(0, "127.0.0.1", r));
+  try {
+    const url = `http://127.0.0.1:${s.address().port}`;
+    const t0 = Date.now();
+    const r = await new Promise((done) => {
+      const p = spawn(process.execPath, [CLI, "resources"], { env: { ...process.env, WAFERMAP_URL: url, WAFERMAP_TIMEOUT_MS: "500" } });
+      let err = "";
+      p.stderr.on("data", (d) => (err += d));
+      p.on("close", (status) => done({ status, err }));
+    });
+    assert.notEqual(r.status, 0);
+    assert.match(r.err, /did not answer within 1 s\. Nothing was paid\. \(timeout\)/);
+    assert.ok(Date.now() - t0 < 10_000);
+    await assert.rejects(listResources(url, 300), (e) => e.code === "timeout");
+  } finally {
+    await new Promise((r) => (s.closeAllConnections(), s.close(r)));
+  }
+});
+
+test("listResources: reads the catalog, and an error page is `network_error`, not an empty list", async () => {
+  let ok = true;
+  const s = createServer((req, res) => {
+    res.writeHead(ok ? 200 : 503, { "content-type": "application/json" });
+    res.end(ok ? JSON.stringify({ data: [{ id: "gas-now", price: 0.001 }] }) : "{}");
+  });
+  await new Promise((r) => s.listen(0, "127.0.0.1", r));
+  try {
+    const url = `http://127.0.0.1:${s.address().port}`;
+    assert.deepEqual((await listResources(url)).map((x) => x.id), ["gas-now"]);
+    ok = false;
+    await assert.rejects(listResources(url), (e) => e.code === "network_error");
   } finally {
     await new Promise((r) => (s.closeAllConnections(), s.close(r)));
   }

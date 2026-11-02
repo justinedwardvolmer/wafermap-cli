@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.3 (2 Nov 2026)
+
+The two open points from the third public review by @whoiskn0why (8/10), thank you.
+
+- **`wafermap resources` has a time limit.** It was the one command that still used a bare `fetch` and could wait forever on a server that never answered. It now gives up after 60 seconds with `timeout`, like every other request, and reports `network_error` instead of printing nothing when the catalog cannot be read. The SDK exports the same function as `listResources(baseUrl?, timeoutMs?)`; `Wafermap.resources()` uses it. `WAFERMAP_TIMEOUT_MS` sets the limit for the CLI and the MCP server.
+- **npm provenance.** From this version the package is published by GitHub Actions (`.github/workflows/publish.yml`) through npm trusted publishing, with a signed provenance statement that ties the tarball on npm to the commit and workflow run that built it. Check it on the npm page ("Provenance") or with `npm audit signatures`. CI holds no npm token: npm trusts this one workflow file in this repo, and nothing else.
+
 ## 0.4.2 (2 Nov 2026)
 
 **$WAFERMAP holder discount.** `call()` (CLI `wafermap call`, MCP `wafermap_call`) now names the paying wallet to Wafermap in an `X-Wafermap-Payer` header, so a wallet holding at least 100,000 $WAFERMAP on Robinhood Chain is quoted 50% less for Wafermap's own resources, on EVM networks. Wafermap checks the balance again against the signer of the payment, so the header only ever lowers the price for the wallet that actually holds. The header goes to Wafermap only: `pay()` sends nothing extra to third-party services. Marketplace listings keep their seller's price.

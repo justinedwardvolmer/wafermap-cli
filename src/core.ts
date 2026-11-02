@@ -122,6 +122,22 @@ export const DEFAULT_TIMEOUT_MS = 60_000;
 
 const timedOut = (e: any) => e?.name === "TimeoutError" || e?.cause?.name === "TimeoutError";
 
+/** Wafermap's resource catalog. Needs no wallet; gives up after `timeoutMs` like every other request. */
+export async function listResources(baseUrl = "https://wafermap.xyz", timeoutMs = DEFAULT_TIMEOUT_MS): Promise<any[]> {
+  const host = new URL(baseUrl).host;
+  const gaveUp = () => new WafermapError("timeout", `${host} did not answer within ${Math.round(timeoutMs / 1000)} s. Nothing was paid.`);
+  const signal = AbortSignal.timeout(timeoutMs);
+  const r = await fetch(`${baseUrl.replace(/\/$/, "")}/v1/resources`, { signal }).catch((e) => {
+    throw timedOut(e) ? gaveUp() : new WafermapError("network_error", `${host}: ${e?.message ?? "request failed"}`);
+  });
+  const j: any = await r.json().catch((e) => {
+    if (timedOut(e)) throw gaveUp();
+    return null;
+  });
+  if (!r.ok || !Array.isArray(j?.data)) throw new WafermapError("network_error", `${host} returned no catalog (HTTP ${r.status}).`);
+  return j.data;
+}
+
 export class Wafermap {
   readonly account: LocalAccount;
   readonly baseUrl: string;
@@ -284,12 +300,7 @@ export class Wafermap {
   // ---- Wafermap resources ----
 
   async resources(): Promise<any[]> {
-    const host = new URL(this.baseUrl).host;
-    const r = await this.fetch(`${this.baseUrl}/v1/resources`).catch((e) => {
-      throw timedOut(e) ? this.timeoutError(host) : new WafermapError("network_error", `${host}: ${e?.message ?? "request failed"}`);
-    });
-    const j: any = await this.body(r, () => r.json(), null, host);
-    return j?.data ?? [];
+    return listResources(this.baseUrl, this.timeoutMs);
   }
 
   async call(id: string, input: Record<string, unknown> = {}, o: { network?: Net } = {}) {

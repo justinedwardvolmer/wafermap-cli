@@ -3,7 +3,7 @@
 import { createInterface } from "node:readline";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { PAY_NETWORKS, payNetworkOf } from "../shared/catalog";
-import { NETS, WafermapError, checkPayment, isNet, mergeLog, type Approval, type Net } from "./core.js";
+import { NETS, WafermapError, checkPayment, isNet, listResources, mergeLog, type Approval, type Net } from "./core.js";
 import { BACKEND_NAME, backend, keychainClear, keychainGet, keychainSet } from "./keychain.js";
 import { openWallet } from "./local.js";
 import { solanaKeyFromEvm } from "../shared/solana";
@@ -222,8 +222,8 @@ Total $${total.toFixed(4)} in ${pays.length} payments. From 0.3.3 every payment 
 
     case "resources": {
       const q = a._.join(" ").toLowerCase();
-      const r = await fetch(`${process.env.WAFERMAP_URL ?? "https://wafermap.xyz"}/v1/resources`).then((x) => x.json() as any);
-      for (const x of (r.data ?? []).filter((x: any) => !q || `${x.id} ${x.name} ${x.summary} ${x.category}`.toLowerCase().includes(q))) console.log(`${x.id.padEnd(22)} $${String(x.price).padEnd(7)} ${x.summary}`);
+      const list = await listResources(process.env.WAFERMAP_URL, Number(process.env.WAFERMAP_TIMEOUT_MS) || undefined);
+      for (const x of list.filter((x: any) => !q || `${x.id} ${x.name} ${x.summary} ${x.category}`.toLowerCase().includes(q))) console.log(`${x.id.padEnd(22)} $${String(x.price).padEnd(7)} ${x.summary}`);
       return;
     }
 

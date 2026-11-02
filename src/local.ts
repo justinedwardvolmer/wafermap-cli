@@ -9,6 +9,7 @@ export function openWallet(password: string, approve?: (a: Approval) => boolean 
   const wm = new Wafermap({
     privateKey: loadKey(password),
     baseUrl: process.env.WAFERMAP_URL,
+    timeoutMs: Number(process.env.WAFERMAP_TIMEOUT_MS) || undefined,
     network: c.network,
     limits: c.limits,
     ledger: { entries: spendLog, record: appendSpend },

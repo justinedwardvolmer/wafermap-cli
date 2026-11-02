@@ -1,0 +1,28 @@
+name: publish
+# Publishes to npm when a version tag (v0.4.3, ...) is pushed. npm trusted publishing: npm accepts this
+# workflow in this repo through GitHub's OIDC token, so CI holds no npm token, and every release carries
+# a signed provenance statement naming the commit and run that built it.
+on:
+  push:
+    tags: ["v*"]
+permissions:
+  contents: read
+  id-token: write
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+      # trusted publishing needs npm 11.5.1 or later
+      - run: npm install -g npm@11.6.2
+      - name: tag must match package.json
+        run: node -e "const v=require('./package.json').version;if(process.env.GITHUB_REF_NAME!=='v'+v){console.error('tag',process.env.GITHUB_REF_NAME,'!= v'+v);process.exit(1)}"
+      - run: npm ci
+      - run: npm run build
+      - run: npm test
+      - run: npm publish --access public --provenance
+      - run: npm pack --silent && node -e "const f=require('fs').readdirSync('.').find(x=>/\.tgz$/.test(x));console.log(require('crypto').createHash('sha256').update(require('fs').readFileSync(f)).digest('hex'),f)"
