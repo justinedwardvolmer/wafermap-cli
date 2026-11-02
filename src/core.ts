@@ -13,6 +13,7 @@ import { arbitrum, base, polygon, robinhood } from "viem/chains";
 import { TOKENS, executeSwap, quoteSwap, resolveToken, type Net as SwapNet, type SwapQuote, type Token } from "../shared/swap";
 import { latestBlockhash, solanaBalances, solanaKeyFromEvm, type SolanaPayer } from "../shared/solana";
 import { CHAIN_KEYS, PAY_CHAINS, x402fetch, X402Error, type ChainKey, type Requirement, type Signed } from "../shared/x402client";
+import { PASS_HEADER, decodePass, encodePass, makePass } from "../shared/pass";
 
 /** A payment network. Swaps run on Robinhood Chain and Base only. */
 export type Net = ChainKey;
@@ -121,6 +122,17 @@ export const DEFAULT_LIMITS: Limits = { perPayment: 0.1, perDay: 1, perSwap: 25 
 export const DEFAULT_TIMEOUT_MS = 60_000;
 
 const timedOut = (e: any) => e?.name === "TimeoutError" || e?.cause?.name === "TimeoutError";
+
+/** What a wallet's $WAFERMAP unlocks (holder price, Pro free calls left today), from /api/holder. Needs no key. */
+export async function holderInfo(address: string, baseUrl = "https://wafermap.xyz", timeoutMs = DEFAULT_TIMEOUT_MS): Promise<any> {
+  const host = new URL(baseUrl).host;
+  const r = await fetch(`${baseUrl.replace(/\/$/, "")}/api/holder?address=${encodeURIComponent(address)}`, { signal: AbortSignal.timeout(timeoutMs) }).catch((e) => {
+    throw timedOut(e) ? new WafermapError("timeout", `${host} did not answer within ${Math.round(timeoutMs / 1000)} s.`) : new WafermapError("network_error", `${host}: ${e?.message ?? "request failed"}`);
+  });
+  const j: any = await r.json().catch(() => null);
+  if (!r.ok || !j) throw new WafermapError(j?.error?.code ?? "network_error", j?.error?.message ?? `${host} answered HTTP ${r.status}.`);
+  return j;
+}
 
 /** Wafermap's resource catalog. Needs no wallet; gives up after `timeoutMs` like every other request. */
 export async function listResources(baseUrl = "https://wafermap.xyz", timeoutMs = DEFAULT_TIMEOUT_MS): Promise<any[]> {
@@ -303,10 +315,24 @@ export class Wafermap {
     return listResources(this.baseUrl, this.timeoutMs);
   }
 
+  private passCache: string | null = null;
+
+  /** A holder pass (shared/pass.ts) signed by this wallet, valid 24 h and reused until its last 10 minutes. It
+   *  proves the wallet to Wafermap for what its $WAFERMAP unlocks (Pro free calls, x402 Tracker Pro). Signing
+   *  a message moves no funds. */
+  async holderPass(): Promise<string> {
+    const p = decodePass(this.passCache);
+    if (this.passCache && p && p.exp - 600 > Date.now() / 1000) return this.passCache;
+    this.passCache = encodePass(await makePass({ address: this.account.address, signMessage: (a) => this.account.signMessage(a) }));
+    return this.passCache;
+  }
+
   async call(id: string, input: Record<string, unknown> = {}, o: { network?: Net } = {}) {
-    // X-Wafermap-Payer names this wallet so a $WAFERMAP holder is quoted the holder price (only sent to Wafermap,
-    // never to third-party services; the server checks the balance again against the signed payment).
-    const go = () => this.paidFetch("resource", id, `${this.baseUrl}/v1/${id}`, { method: "POST", headers: { "content-type": "application/json", "x-wafermap-payer": this.address }, body: JSON.stringify(input) }, o.network);
+    // X-Wafermap-Payer names this wallet so a $WAFERMAP holder is quoted the holder price, and the holder pass lets
+    // a Pro holder's free calls apply (no payment is signed then). Both go to Wafermap only, never to third-party
+    // services or marketplace sellers; the server checks the balance again itself.
+    const pass = id.startsWith("m/") ? null : await this.holderPass();
+    const go = () => this.paidFetch("resource", id, `${this.baseUrl}/v1/${id}`, { method: "POST", headers: { "content-type": "application/json", "x-wafermap-payer": this.address, ...(pass ? { [PASS_HEADER]: pass } : {}) }, body: JSON.stringify(input) }, o.network);
     const settle = (r: Awaited<ReturnType<typeof go>>, out: any) => {
       if (!r.paid || !r.id) return;
       const status: PaymentStatus = r.res.status === 402 ? "refused" : r.res.ok ? "ok" : "failed";
@@ -331,7 +357,7 @@ export class Wafermap {
     const refused = this.rejected(res, out, paid);
     if (refused) throw refused;
     if (!res.ok) throw new WafermapError(out?.error?.code ?? "http_error", out?.error?.message ?? (typeof out?.error === "string" ? out.error : `HTTP ${res.status}`));
-    return out as { resource: string; result: any; receipt: { network: string; asset: string; amountUsd: number; payer: string; tx: string; ms: number } | null };
+    return out as { resource: string; result: any; receipt: { network: string; asset: string; amountUsd: number; payer: string; tx: string; ms: number } | null; free?: { wallet: string; left: number; perDay: number } };
   }
 
   // ---- Third-party x402 services ----

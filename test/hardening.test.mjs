@@ -9,8 +9,8 @@ import { chmodSync, mkdtempSync, readFileSync, writeFileSync, existsSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
-import { encodeFunctionData, parseAbi } from "viem";
-import { Wafermap, listResources, mergeLog, MAX_VALIDITY_SECONDS, quoteSwap, executeSwap, KYBER_ROUTER } from "../dist/index.js";
+import { encodeFunctionData, parseAbi, verifyMessage } from "viem";
+import { Wafermap, decodePass, passMessage, listResources, mergeLog, MAX_VALIDITY_SECONDS, quoteSwap, executeSwap, KYBER_ROUTER } from "../dist/index.js";
 
 const USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 const PAY_TO = "0x000000000000000000000000000000000000dEaD";
@@ -282,6 +282,39 @@ test("listResources: reads the catalog, and an error page is `network_error`, no
     assert.deepEqual((await listResources(url)).map((x) => x.id), ["gas-now"]);
     ok = false;
     await assert.rejects(listResources(url), (e) => e.code === "network_error");
+  } finally {
+    await new Promise((r) => (s.closeAllConnections(), s.close(r)));
+  }
+});
+
+// ---- 0.4.4: holder pass and Pro free calls ----
+
+test("call() sends a holder pass that verifies for this wallet; pay() and marketplace calls never get one", async () => {
+  const seen = [];
+  const s = createServer((req, res) => {
+    seen.push({ url: req.url, pass: req.headers["x-wafermap-pass"] ?? null });
+    req.resume();
+    req.on("end", () => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ resource: "r", result: { ok: true }, receipt: null, free: { wallet: "w", left: 9, perDay: 10 } }));
+    });
+  });
+  await new Promise((r) => s.listen(0, "127.0.0.1", r));
+  const url = `http://127.0.0.1:${s.address().port}`;
+  try {
+    const { wm, log } = wallet(url);
+    const out = await wm.call("r");
+    await wm.call("m/some-listing");
+    await wm.pay(`${url}/third-party`);
+    assert.deepEqual(out.free, { wallet: "w", left: 9, perDay: 10 });
+    assert.equal(log.length, 0); // a free call records no payment
+    const p = decodePass(seen[0].pass);
+    assert.equal(p.address, wm.address);
+    assert.ok(p.exp - p.iat <= 86400);
+    assert.ok(await verifyMessage({ address: p.address, message: passMessage(p.address, p.iat, p.exp), signature: p.sig }));
+    assert.equal(seen[1].pass, null);
+    assert.equal(seen[2].pass, null);
+    assert.equal(await wm.holderPass(), seen[0].pass); // reused, not re-signed per call
   } finally {
     await new Promise((r) => (s.closeAllConnections(), s.close(r)));
   }

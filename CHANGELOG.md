@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.4 (2 Nov 2026)
+
+**$WAFERMAP holder tiers.**
+
+- **Pro free calls.** A wallet holding 1,000,000 $WAFERMAP on Robinhood Chain gets 10 free calls a day (UTC) to Wafermap resources listed at $0.01 or less. `call()` (CLI `wafermap call`, MCP `wafermap_call`) sends a **holder pass** to Wafermap with each call; when the call is free, the result comes back with `receipt: null` and `free: {left, perDay}`, no payment is signed and nothing is recorded as spending. Otherwise the call is quoted and paid as before.
+- **Holder pass.** A message the wallet signs (`personal_sign`: no transaction, no cost) that proves it holds the wallet, valid for 24 hours and reused until its last 10 minutes (`Wafermap.holderPass()`). It goes to Wafermap only: never with `pay()` to third-party services, and never to marketplace listings (`m/...`). The SDK exports `PASS_HEADER`, `passMessage`, `encodePass`, `decodePass`, `makePass`.
+- **`wafermap holder`** shows what the wallet's $WAFERMAP unlocks: holder price, tier, free calls left today, x402 Tracker Pro. Needs no password (`holderInfo()` in the SDK).
+- **`wafermap pass`** prints a pass for scripts, e.g. the x402 Tracker Pro API (`/api/x402/pro/movers`, `/api/x402/pro/export`, for wallets holding 100,000 $WAFERMAP).
+
 ## 0.4.3 (2 Nov 2026)
 
 The two open points from the third public review by @whoiskn0why (8/10), thank you.

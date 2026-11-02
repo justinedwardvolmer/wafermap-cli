@@ -3,7 +3,7 @@
 import { createInterface } from "node:readline";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
 import { PAY_NETWORKS, payNetworkOf } from "../shared/catalog";
-import { NETS, WafermapError, checkPayment, isNet, listResources, mergeLog, type Approval, type Net } from "./core.js";
+import { NETS, WafermapError, checkPayment, holderInfo, isNet, listResources, mergeLog, type Approval, type Net } from "./core.js";
 import { BACKEND_NAME, backend, keychainClear, keychainGet, keychainSet } from "./keychain.js";
 import { openWallet } from "./local.js";
 import { solanaKeyFromEvm } from "../shared/solana";
@@ -24,6 +24,8 @@ Wallet
 Pay
   wafermap resources [words]            Wafermap's pay-per-call catalog
   wafermap call <id> [field=value ...]  run a resource and pay its price  (--json '{...}' for complex input)
+  wafermap holder                       what this wallet's $WAFERMAP unlocks: holder price, Pro free calls left today
+  wafermap pass                         print a holder pass (X-Wafermap-Pass) for scripts and x402 Tracker Pro
   wafermap discover <words>             search third-party x402 services
   wafermap pay <url> [field=value ...]  call any x402 URL and pay it       (--post to send a JSON body)
 
@@ -156,6 +158,27 @@ async function main() {
       return;
     }
 
+    case "holder": {
+      const addr = keystoreAddress() ?? die("No wallet yet. Run `wafermap init`.");
+      const j = await holderInfo(addr, process.env.WAFERMAP_URL, Number(process.env.WAFERMAP_TIMEOUT_MS) || undefined);
+      if (!j.active) return console.log("The $WAFERMAP holder program is off.");
+      const n = (v: number) => Math.floor(v).toLocaleString("en-US");
+      const k = j.perks;
+      console.log(`${addr}\n  holds     ${n(j.balance)} $WAFERMAP on Robinhood Chain`);
+      console.log(`  tier      ${j.tier === "pro" ? "Pro" : j.tier === "holder" ? "Holder" : "none"}`);
+      console.log(`  price     ${j.holder ? `${j.percent}% off Wafermap resources on EVM networks` : `regular (hold ${n(j.minTokens)} for ${j.percent}% off)`}`);
+      if (k) console.log(`  free      ${j.tier === "pro" ? `${k.freeLeftToday ?? "?"} of ${k.freeCallsPerDay} free calls left today (resources up to $${k.freeMaxUsd}); \`wafermap call\` uses them first` : `hold ${n(k.proMinTokens)} for ${k.freeCallsPerDay} free calls a day`}`);
+      return console.log(`  tracker   ${j.holder ? "x402 Tracker Pro unlocked: wafermap.xyz/x402 (or \`wafermap pass\` for the API)" : `x402 Tracker Pro needs ${n(j.minTokens)}`}`);
+    }
+
+    case "pass": {
+      const wm = openWallet(await password());
+      const v = await wm.holderPass();
+      console.error(`Holder pass for ${wm.address}, valid 24 hours. It proves you hold the wallet and moves no funds; anyone who has it can use your free calls until it expires, so keep it private. Send it as X-Wafermap-Pass:`);
+      console.error(`  curl -H "X-Wafermap-Pass: $(wafermap pass)" https://wafermap.xyz/api/x402/pro/movers`);
+      return console.log(v);
+    }
+
     case "address": {
       const evm = keystoreAddress() ?? die("No wallet yet. Run `wafermap init`.");
       let sol = keystoreSolana();
@@ -241,6 +264,7 @@ Total $${total.toFixed(4)} in ${pays.length} payments. From 0.3.3 every payment 
       const wm = openWallet(await password(), approver(yes));
       const out = await wm.call(id, inputOf(a, 1), { network: net(a.flags.network) });
       if (out.receipt) console.error(`✓ Paid $${out.receipt.amountUsd} ${out.receipt.asset} · ${EXPLORER(out.receipt.network)}/tx/${out.receipt.tx}`);
+      else if (out.free) console.error(`✓ Free call ($WAFERMAP Pro) · ${out.free.left} of ${out.free.perDay} left today. Nothing was paid.`);
       if (typeof a.flags.out === "string") await saveMedia(out.result, a.flags.out);
       return printResult(out.result);
     }
