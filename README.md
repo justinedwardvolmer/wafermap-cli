@@ -84,6 +84,8 @@ Pass `approve: (a) => boolean` to confirm each payment or swap yourself, and `le
 
 A wallet that holds at least 100,000 $WAFERMAP on Robinhood Chain pays 50% less for Wafermap's own resources when it pays on an EVM network (Robinhood Chain, Base, Arbitrum, Polygon). Nothing to set up: `wafermap call` names the wallet to Wafermap and the quote comes back discounted; the server re-checks the balance of the wallet that signs. Marketplace listings and Solana payments keep the regular price. Check a wallet: https://wafermap.xyz/api/holder?address=0x…, or run `wafermap holder`.
 
+Wafermap's own resources can also be **paid in $WAFERMAP at 50% off, and the tokens are burned**: `wafermap approve-wafermap` once (a Permit2 approval, one Robinhood Chain transaction), then `wafermap call <id> --pay wafermap`. Each payment is a Permit2 signature for one exact amount, usable for two minutes only by Wafermap's relayer (fixed in the client), checked against a market price the client reads itself.
+
 With 1,000,000 $WAFERMAP the wallet is **Pro**: 10 free calls a day (UTC) to resources listed at $0.01 or less. `wafermap call` sends a holder pass (a signed message, no transaction, valid 24 hours) to Wafermap only; when a call is free, nothing is signed for payment and it prints `✓ Free call`. Holders of 100,000 also unlock x402 Tracker Pro: `wafermap pass` prints a pass for its API. Details: https://wafermap.xyz/docs#holders
 
 ## Where the limits live

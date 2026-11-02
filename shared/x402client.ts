@@ -46,7 +46,72 @@ export type Requirement = {
   raw: any;
 };
 
-export type Quote = { version: 1 | 2; resource: any; accepts: Requirement[]; offered: string[]; inputError?: { code: string; message: string } };
+export type Quote = { version: 1 | 2; resource: any; accepts: Requirement[]; offered: string[]; inputError?: { code: string; message: string }; token?: TokenRequirement };
+
+// ---- Paying Wafermap in $WAFERMAP (Permit2, burned) ----
+// A Permit2 PermitTransferFrom lets its spender send the tokens anywhere, so the client trusts the quote for nothing
+// it can check itself:
+//   - it signs only when the caller asks (`payIn: "wafermap"`), and the Wafermap SDK asks only for its own resources;
+//   - the spender must be one of WAFERMAP_RELAYERS, fixed in this code, so a lookalike or compromised server
+//     cannot name itself;
+//   - the quote must name the canonical Permit2, the $WAFERMAP token and the dead address;
+//   - the token amount is valued at the market price read by the client itself (GeckoTerminal), and refused when it
+//     is worth more than the quote's USD figure allows; caps count the higher of the two.
+export const WAFERMAP_TOKEN = "0xfda080f64d84c989cfc50ff18253542cfe502db3";
+export const PERMIT2 = "0x000000000022D473030F116dDEE9F6B43aC78BA3";
+export const DEAD = "0x000000000000000000000000000000000000dEaD";
+export const TOKEN_SCHEME = "wafermap-permit2";
+/** Wafermap's relayer wallets, the only spenders this client signs a $WAFERMAP permit for. Empty: paying in
+ *  $WAFERMAP is off in this build. A new relayer address ships as a new client release. */
+export const WAFERMAP_RELAYERS: string[] = ["0xD21547a387a9CfFb747211983c91f457742Ef00D"];
+/** A permit may be worth at most this much more than the quote says (price moves between quote and check). */
+const TOKEN_VALUE_SLACK = 1.25;
+
+/** $WAFERMAP in USD, read by the client itself from GeckoTerminal. Throws when it cannot be read. */
+export async function wafermapPriceUsd(f: typeof fetch = fetch): Promise<number> {
+  const res = await f(`https://api.geckoterminal.com/api/v2/simple/networks/robinhood/token_price/${WAFERMAP_TOKEN}`, { headers: { accept: "application/json" }, signal: AbortSignal.timeout(15_000) });
+  const j: any = await res.json().catch(() => null);
+  const p = Number(j?.data?.attributes?.token_prices?.[WAFERMAP_TOKEN]);
+  if (!res.ok || !(p > 0)) throw new X402Error("price_unavailable", "The $WAFERMAP market price could not be read, so the amount cannot be checked. Nothing was signed; pay in USDG or USDC.");
+  return p;
+}
+export type TokenRequirement = { amount: string; usd: number; spender: Hex; maxTimeoutSeconds: number; raw: any };
+const PERMIT_TYPES = {
+  PermitTransferFrom: [
+    { name: "permitted", type: "TokenPermissions" },
+    { name: "spender", type: "address" },
+    { name: "nonce", type: "uint256" },
+    { name: "deadline", type: "uint256" },
+  ],
+  TokenPermissions: [
+    { name: "token", type: "address" },
+    { name: "amount", type: "uint256" },
+  ],
+} as const;
+
+function tokenOption(r: any): TokenRequirement | undefined {
+  const e = r?.extra ?? {};
+  const same = (a: unknown, b: string) => String(a ?? "").toLowerCase() === b.toLowerCase();
+  if (r?.scheme !== TOKEN_SCHEME || r.network !== "eip155:4663" || !same(r.asset, WAFERMAP_TOKEN) || !same(r.payTo, DEAD) || !same(e.permit2, PERMIT2)) return;
+  if (!/^\d{1,40}$/.test(String(r.amount)) || !/^0x[0-9a-fA-F]{40}$/.test(String(e.spender)) || !(Number(e.usd) > 0)) return;
+  if (!WAFERMAP_RELAYERS.some((a) => same(e.spender, a))) return;
+  return { amount: String(r.amount), usd: Number(e.usd), spender: e.spender as Hex, maxTimeoutSeconds: Number(r.maxTimeoutSeconds) || 120, raw: r };
+}
+
+/** Signs a Permit2 transfer of exactly the quoted $WAFERMAP to Wafermap's relayer, valid for at most 120 s. */
+export async function signTokenPayment(signer: Signer, t: TokenRequirement, resource: any): Promise<{ name: string; value: string; deadline: number }> {
+  const nonce = BigInt(randomNonce()) >> 8n; // any unused uint256; 248 random bits
+  const deadline = BigInt(Math.floor(Date.now() / 1000) + Math.min(t.maxTimeoutSeconds, 120));
+  const permitted = { token: WAFERMAP_TOKEN as Hex, amount: BigInt(t.amount) };
+  let signature: Hex;
+  try {
+    signature = await signer.signTypedData({ domain: { name: "Permit2", chainId: 4663, verifyingContract: PERMIT2 as Hex }, types: PERMIT_TYPES, primaryType: "PermitTransferFrom", message: { permitted, spender: t.spender, nonce, deadline } });
+  } catch (e: any) {
+    throw new X402Error("sign_rejected", e?.shortMessage ?? e?.message ?? "Signature rejected.");
+  }
+  const payload = { owner: signer.address, permit: { permitted: { token: WAFERMAP_TOKEN, amount: t.amount }, nonce: nonce.toString(), deadline: deadline.toString() }, signature };
+  return { name: "PAYMENT-SIGNATURE", value: b64encode(JSON.stringify({ x402Version: 2, resource, accepted: t.raw, payload })), deadline: Number(deadline) };
+}
 
 export class X402Error extends Error {
   constructor(
@@ -87,8 +152,13 @@ export async function readQuote(res: Response): Promise<Quote> {
   const version: 1 | 2 = Number(body.x402Version) === 1 ? 1 : 2;
   const accepts: Requirement[] = [];
   const offered: string[] = [];
+  let token: TokenRequirement | undefined;
   for (const r of body.accepts) {
     offered.push(`${r.scheme ?? "?"}/${r.network ?? "?"}`);
+    if (r?.scheme === TOKEN_SCHEME) {
+      token ??= tokenOption(r);
+      continue;
+    }
     const chain = chainOf(r.network);
     if (!chain || r.scheme !== "exact") continue;
     if (chain.vm === "evm" ? String(r.asset ?? "").toLowerCase() !== chain.stable.toLowerCase() : r.asset !== chain.stable) continue;
@@ -102,7 +172,7 @@ export async function readQuote(res: Response): Promise<Quote> {
     accepts.push({ version, chain, amount, usd: Number(amount) / 1e6, payTo: r.payTo, asset: r.asset, maxTimeoutSeconds: Number(r.maxTimeoutSeconds) || 120, extra, raw: r });
   }
   const inputError = body.inputError?.message ? { code: String(body.inputError.code ?? "invalid_input"), message: String(body.inputError.message) } : undefined;
-  return { version, resource: body.resource ?? null, accepts, offered, inputError };
+  return { version, resource: body.resource ?? null, accepts, offered, inputError, ...(token ? { token } : {}) };
 }
 
 /** Pick the requirement to pay: the first preferred chain that is offered. */
@@ -177,7 +247,7 @@ export function readSettlement(res: Response): { tx?: string; network?: string; 
 /** What an EVM payment authorized on-chain: anyone holding it can execute it until `validBefore`
  *  (unix seconds), once. `authorizationState(from, nonce)` on the token says whether it was used. */
 export type SignedAuth = { nonce: Hex; validBefore: number };
-export type Signed = { req: Requirement; from: string; auth?: SignedAuth };
+export type Signed = { req: Requirement; from: string; auth?: SignedAuth; token?: { amount: string } };
 export type PaidCall = { res: Response; paid: (Signed & { tx: string | null }) | null };
 
 /**
@@ -190,7 +260,7 @@ export type PaidCall = { res: Response; paid: (Signed & { tx: string | null }) |
 export async function x402fetch(
   url: string,
   init: RequestInit,
-  opts: { signer: Signer | (() => Promise<Signer>); solana?: SolanaPayer; prefer?: ChainKey[]; approve?: (req: Requirement) => Promise<void> | void; onSigned?: (s: Signed) => void; fetch?: typeof fetch },
+  opts: { signer: Signer | (() => Promise<Signer>); solana?: SolanaPayer; prefer?: ChainKey[]; approve?: (req: Requirement) => Promise<void> | void; onSigned?: (s: Signed) => void; fetch?: typeof fetch; payIn?: "stablecoin" | "wafermap"; tokenPriceUsd?: () => Promise<number> },
 ): Promise<PaidCall> {
   const f = opts.fetch ?? fetch;
   const first = await f(url, init);
@@ -198,6 +268,25 @@ export async function x402fetch(
   const quote = await readQuote(first);
   // Some servers (Wafermap among them) quote even when the input is wrong; never sign for that.
   if (quote.inputError) throw new X402Error(quote.inputError.code, quote.inputError.message);
+  if (opts.payIn === "wafermap") {
+    const t = quote.token;
+    if (!t) throw new X402Error("token_not_offered", "This call is not offered in $WAFERMAP right now (or not to a known Wafermap relayer). Pay in USDG or USDC.");
+    // Value what would be signed at the client's own market price; the quote's USD figure is only a claim.
+    const value = (Number(BigInt(t.amount) / 10n ** 12n) / 1e6) * (await (opts.tokenPriceUsd ?? (() => wafermapPriceUsd(fetch)))());
+    if (value > t.usd * TOKEN_VALUE_SLACK + 0.0005) throw new X402Error("price_mismatch", `The quote asks for $WAFERMAP worth about $${value.toFixed(4)} at the market price, more than the $${t.usd} it states. Nothing was signed.`);
+    const usd = Math.max(t.usd, Math.round(value * 1e6) / 1e6);
+    // For caps and the ledger it is a Robinhood Chain payment worth `usd`.
+    const req: Requirement = { version: 2, chain: PAY_CHAINS[0], amount: String(Math.round(usd * 1e6)), usd, payTo: DEAD, asset: WAFERMAP_TOKEN, maxTimeoutSeconds: t.maxTimeoutSeconds, extra: {}, raw: t.raw };
+    if (opts.approve) await opts.approve(req);
+    const signer = typeof opts.signer === "function" ? await opts.signer() : opts.signer;
+    const header = await signTokenPayment(signer, t, quote.resource);
+    const signed: Signed = { req, from: signer.address, token: { amount: t.amount } };
+    opts.onSigned?.(signed);
+    const headers = new Headers(init.headers);
+    headers.set(header.name, header.value);
+    const res = await f(url, { ...init, headers });
+    return { res, paid: { ...signed, tx: readSettlement(res)?.tx ?? null } };
+  }
   const req = choose(quote, (opts.prefer ?? CHAIN_KEYS).filter((k) => k !== "solana" || opts.solana));
   if (opts.approve) await opts.approve(req);
   const svm = req.chain.vm === "svm";

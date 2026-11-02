@@ -24,6 +24,8 @@ Wallet
 Pay
   wafermap resources [words]            Wafermap's pay-per-call catalog
   wafermap call <id> [field=value ...]  run a resource and pay its price  (--json '{...}' for complex input)
+  wafermap call <id> ... --pay wafermap pay a Wafermap resource in $WAFERMAP at 50% off (the tokens are burned)
+  wafermap approve-wafermap             one-time approval so the wallet can pay in $WAFERMAP (Robinhood Chain, ETH gas)
   wafermap holder                       what this wallet's $WAFERMAP unlocks: holder price, Pro free calls left today
   wafermap pass                         print a holder pass (X-Wafermap-Pass) for scripts and x402 Tracker Pro
   wafermap discover <words>             search third-party x402 services
@@ -158,6 +160,15 @@ async function main() {
       return;
     }
 
+    case "approve-wafermap": {
+      const wm = openWallet(await password());
+      if (await wm.wafermapApproved()) return console.log("✓ Already approved: this wallet can pay Wafermap in $WAFERMAP (wafermap call <id> --pay wafermap).");
+      console.error(`This sends one transaction on Robinhood Chain from ${wm.address}, paid in ETH: approve Permit2 (Uniswap, 0x000000000022D473030F116dDEE9F6B43aC78BA3) to move this wallet's $WAFERMAP. Each payment after that is a separate signature for one exact amount, usable only by Wafermap's relayer for two minutes.`);
+      if (!yes && !/^y(es)?$/i.test((await ask("Send the approval? [y/N] ")).trim())) die("Cancelled. Nothing was sent.");
+      const tx = await wm.approveWafermap();
+      return console.log(`✓ Approved · ${EXPLORER("robinhood")}/tx/${tx}`);
+    }
+
     case "holder": {
       const addr = keystoreAddress() ?? die("No wallet yet. Run `wafermap init`.");
       const j = await holderInfo(addr, process.env.WAFERMAP_URL, Number(process.env.WAFERMAP_TIMEOUT_MS) || undefined);
@@ -262,8 +273,10 @@ Total $${total.toFixed(4)} in ${pays.length} payments. From 0.3.3 every payment 
     case "call": {
       const id = a._[0] ?? die("Which resource? e.g. wafermap call gas-now network=base");
       const wm = openWallet(await password(), approver(yes));
-      const out = await wm.call(id, inputOf(a, 1), { network: net(a.flags.network) });
-      if (out.receipt) console.error(`✓ Paid $${out.receipt.amountUsd} ${out.receipt.asset} · ${EXPLORER(out.receipt.network)}/tx/${out.receipt.tx}`);
+      const payIn = a.flags.pay === "wafermap" ? "wafermap" : a.flags.pay === undefined || a.flags.pay === "usd" ? undefined : die("--pay must be wafermap (or leave it out to pay in USDG/USDC)");
+      const out = await wm.call(id, inputOf(a, 1), { network: net(a.flags.network), payIn });
+      if (out.receipt?.asset === "WAFERMAP") console.error(`✓ Paid ${out.receipt.amountTokens} $WAFERMAP (≈ $${out.receipt.amountUsd}), burned · ${EXPLORER(out.receipt.network)}/tx/${out.receipt.tx}`);
+      else if (out.receipt) console.error(`✓ Paid $${out.receipt.amountUsd} ${out.receipt.asset} · ${EXPLORER(out.receipt.network)}/tx/${out.receipt.tx}`);
       else if (out.free) console.error(`✓ Free call ($WAFERMAP Pro) · ${out.free.left} of ${out.free.perDay} left today. Nothing was paid.`);
       if (typeof a.flags.out === "string") await saveMedia(out.result, a.flags.out);
       return printResult(out.result);

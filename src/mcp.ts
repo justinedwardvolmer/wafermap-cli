@@ -116,11 +116,16 @@ export async function runMcp() {
     {
       title: "Call a Wafermap resource",
       description: "Run one Wafermap resource and pay its exact price over x402 from the local wallet, within the per-payment and daily caps. Failed calls are not charged.",
-      inputSchema: { resource: z.string().describe("Resource id, e.g. market-brief, prediction-markets, stock-signal, flux-2-dev."), input: z.record(z.string(), z.any()).optional().describe("Input fields for the resource."), network: NET },
+      inputSchema: {
+        resource: z.string().describe("Resource id, e.g. market-brief, prediction-markets, stock-signal, flux-2-dev."),
+        input: z.record(z.string(), z.any()).optional().describe("Input fields for the resource."),
+        network: NET,
+        payIn: z.enum(["stablecoin", "wafermap"]).optional().describe("wafermap: pay Wafermap's own resources in $WAFERMAP at 50% off (the tokens are burned; needs `wafermap approve-wafermap` once). Default: USDG/USDC."),
+      },
     },
-    async ({ resource, input, network }) => {
+    async ({ resource, input, network, payIn }) => {
       try {
-        return result(await wm.call(resource, input ?? {}, { network }));
+        return result(await wm.call(resource, input ?? {}, { network, payIn }));
       } catch (e) {
         return failure(e);
       }

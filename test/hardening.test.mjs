@@ -9,8 +9,8 @@ import { chmodSync, mkdtempSync, readFileSync, writeFileSync, existsSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { generatePrivateKey, privateKeyToAccount } from "viem/accounts";
-import { encodeFunctionData, parseAbi, verifyMessage } from "viem";
-import { Wafermap, decodePass, passMessage, listResources, mergeLog, MAX_VALIDITY_SECONDS, quoteSwap, executeSwap, KYBER_ROUTER } from "../dist/index.js";
+import { encodeFunctionData, parseAbi, verifyMessage, verifyTypedData } from "viem";
+import { Wafermap, WAFERMAP_RELAYERS, decodePass, passMessage, listResources, mergeLog, MAX_VALIDITY_SECONDS, quoteSwap, executeSwap, KYBER_ROUTER } from "../dist/index.js";
 
 const USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 const PAY_TO = "0x000000000000000000000000000000000000dEaD";
@@ -316,6 +316,70 @@ test("call() sends a holder pass that verifies for this wallet; pay() and market
     assert.equal(seen[2].pass, null);
     assert.equal(await wm.holderPass(), seen[0].pass); // reused, not re-signed per call
   } finally {
+    await new Promise((r) => (s.closeAllConnections(), s.close(r)));
+  }
+});
+
+// ---- 0.4.5: paying Wafermap in $WAFERMAP (Permit2, burned) ----
+
+test("--pay wafermap signs a Permit2 transfer of the exact quote to Wafermap's relayer; pay() never signs one", async () => {
+  const relayer = privateKeyToAccount(generatePrivateKey()).address;
+  const TOKEN = "0xfda080f64d84c989cfc50ff18253542cfe502db3";
+  const token = (over = {}) => ({ scheme: "wafermap-permit2", network: "eip155:4663", asset: TOKEN, amount: "100000000000000000000", payTo: "0x000000000000000000000000000000000000dEaD", maxTimeoutSeconds: 120, extra: { permit2: "0x000000000022D473030F116dDEE9F6B43aC78BA3", spender: relayer, usd: 0.002, decimals: 18, ...over.extra }, ...over });
+  let offer = token();
+  const got = [];
+  const s = createServer((req, res) => {
+    req.resume();
+    req.on("end", () => {
+      const sig = req.headers["payment-signature"];
+      if (!sig) {
+        const q = { x402Version: 2, resource: { url: req.url }, accepts: [{ scheme: "exact", network: "eip155:8453", amount: "4000", asset: USDC_BASE, payTo: PAY_TO, maxTimeoutSeconds: 60, extra: { name: "USD Coin", version: "2" } }, offer] };
+        res.writeHead(402, { "payment-required": b64(q), "content-type": "application/json" });
+        return res.end(JSON.stringify(q));
+      }
+      got.push(unb64(sig));
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ resource: "r", result: { ok: true }, receipt: { network: "eip155:4663", asset: "WAFERMAP", amountTokens: 100, amountUsd: 0.002, burned: true, tx: "0xabc" } }));
+    });
+  });
+  await new Promise((r) => s.listen(0, "127.0.0.1", r));
+  const url = `http://127.0.0.1:${s.address().port}`;
+  try {
+    // only a relayer this build knows is ever a spender
+    let price = 0.00002;
+    const { wm, log } = wallet(url, { rpc: { robinhood: "http://127.0.0.1:9" }, tokenPriceUsd: async () => price });
+    await assert.rejects(wm.call("r", {}, { payIn: "wafermap" }), (e) => e.code === "token_not_offered");
+    assert.equal(got.length, 0);
+    WAFERMAP_RELAYERS.push(relayer);
+    // 100 tokens at $0.0001 is $0.01, far above the quote's $0.002: refused before signing
+    price = 0.0001;
+    await assert.rejects(wm.call("r", {}, { payIn: "wafermap" }), (e) => e.code === "price_mismatch");
+    assert.equal(got.length, 0);
+    price = 0.00002;
+    const out = await wm.call("r", {}, { payIn: "wafermap" });
+    assert.equal(out.receipt.asset, "WAFERMAP");
+    const p = got[0];
+    assert.equal(p.accepted.scheme, "wafermap-permit2");
+    assert.equal(p.payload.owner, wm.address);
+    assert.equal(p.payload.permit.permitted.amount, "100000000000000000000");
+    const deadline = BigInt(p.payload.permit.deadline);
+    assert.ok(deadline - BigInt(Math.floor(Date.now() / 1000)) <= 120n);
+    const ok = await verifyTypedData({ address: wm.address, domain: { name: "Permit2", chainId: 4663, verifyingContract: "0x000000000022D473030F116dDEE9F6B43aC78BA3" }, types: { PermitTransferFrom: [{ name: "permitted", type: "TokenPermissions" }, { name: "spender", type: "address" }, { name: "nonce", type: "uint256" }, { name: "deadline", type: "uint256" }], TokenPermissions: [{ name: "token", type: "address" }, { name: "amount", type: "uint256" }] }, primaryType: "PermitTransferFrom", message: { permitted: { token: TOKEN, amount: 10n ** 20n }, spender: relayer, nonce: BigInt(p.payload.permit.nonce), deadline }, signature: p.payload.signature });
+    assert.ok(ok, "permit signed for the relayer as spender");
+    assert.equal(log.find((e) => e.status === "signed").usd, 0.002); // counted against the caps at its USD value
+
+    // a third-party service offering the same option gets a stablecoin payment, never a permit
+    await wm.pay(`${url}/x`);
+    assert.equal(got[1].accepted.scheme, "exact");
+
+    // an option that does not burn, or names another Permit2, is ignored
+    offer = token({ payTo: relayer }); // not the dead address: not a burn
+    await assert.rejects(wm.call("r", {}, { payIn: "wafermap" }), (e) => e.code === "token_not_offered");
+    offer = token({ extra: { permit2: relayer } });
+    await assert.rejects(wm.call("r", {}, { payIn: "wafermap" }), (e) => e.code === "token_not_offered");
+    await assert.rejects(wm.call("m/listing", {}, { payIn: "wafermap" }), (e) => e.code === "token_not_offered");
+  } finally {
+    WAFERMAP_RELAYERS.length = 0;
     await new Promise((r) => (s.closeAllConnections(), s.close(r)));
   }
 });

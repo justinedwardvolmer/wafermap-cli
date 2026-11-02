@@ -12,7 +12,7 @@ import { privateKeyToAccount } from "viem/accounts";
 import { arbitrum, base, polygon, robinhood } from "viem/chains";
 import { TOKENS, executeSwap, quoteSwap, resolveToken, type Net as SwapNet, type SwapQuote, type Token } from "../shared/swap";
 import { latestBlockhash, solanaBalances, solanaKeyFromEvm, type SolanaPayer } from "../shared/solana";
-import { CHAIN_KEYS, PAY_CHAINS, x402fetch, X402Error, type ChainKey, type Requirement, type Signed } from "../shared/x402client";
+import { CHAIN_KEYS, PAY_CHAINS, PERMIT2, WAFERMAP_TOKEN, x402fetch, X402Error, type ChainKey, type Requirement, type Signed } from "../shared/x402client";
 import { PASS_HEADER, decodePass, encodePass, makePass } from "../shared/pass";
 
 /** A payment network. Swaps run on Robinhood Chain and Base only. */
@@ -73,6 +73,9 @@ export type WafermapOptions = {
   /** Give up on any HTTP request (quote, paid call, discovery, swap API) after this long. Default 60000 ms.
    *  A paid call that times out after signing stays counted until its authorization expires. */
   timeoutMs?: number;
+  /** Where the $WAFERMAP price comes from when paying in $WAFERMAP (default: GeckoTerminal, read by this client).
+   *  The signed amount is valued at this price and refused when it is worth more than the quote states. */
+  tokenPriceUsd?: () => Promise<number>;
 };
 
 export class WafermapError extends Error {
@@ -164,6 +167,7 @@ export class Wafermap {
   readonly timeoutMs: number;
   /** fetch with this wallet's time limit: a server that never answers cannot hold a call forever. */
   readonly fetch: typeof fetch;
+  private readonly tokenPriceUsd?: () => Promise<number>;
 
   constructor(o: WafermapOptions) {
     const account = o.account ?? (o.privateKey ? privateKeyToAccount(o.privateKey) : null);
@@ -177,6 +181,7 @@ export class Wafermap {
     this.approveFn = o.approve;
     this.rpc = o.rpc ?? {};
     this.timeoutMs = o.timeoutMs && o.timeoutMs > 0 ? o.timeoutMs : DEFAULT_TIMEOUT_MS;
+    this.tokenPriceUsd = o.tokenPriceUsd;
     this.fetch = (input, init) => fetch(input, { ...init, signal: init?.signal ?? AbortSignal.timeout(this.timeoutMs) });
     const sol = o.solana ?? (o.privateKey ? solanaKeyFromEvm(o.privateKey) : null);
     const solRpc = this.rpc.solana ?? `${this.baseUrl}/api/solana`;
@@ -265,7 +270,7 @@ export class Wafermap {
     return prev.then(() => release);
   }
 
-  private async paidFetch(kind: "resource" | "service", what: string, url: string, init: RequestInit, network?: Net) {
+  private async paidFetch(kind: "resource" | "service", what: string, url: string, init: RequestInit, network?: Net, payIn?: "wafermap") {
     let id: string | null = null;
     let release: (() => void) | null = null;
     const unlock = () => {
@@ -278,9 +283,11 @@ export class Wafermap {
         solana: this.solana ?? undefined,
         prefer: this.prefer(network),
         fetch: this.fetch,
+        payIn,
+        tokenPriceUsd: this.tokenPriceUsd,
         approve: async (req) => {
           release = await this.acquire();
-          await this.gate({ kind, what, usd: req.usd, network: req.chain.key, detail: `${req.chain.symbol} to ${req.payTo}` });
+          await this.gate({ kind, what, usd: req.usd, network: req.chain.key, detail: req.asset === WAFERMAP_TOKEN ? "in $WAFERMAP at 50% off, burned" : `${req.chain.symbol} to ${req.payTo}` });
         },
         onSigned: (s) => {
           id = this.booked(kind, what, s);
@@ -327,12 +334,39 @@ export class Wafermap {
     return this.passCache;
   }
 
-  async call(id: string, input: Record<string, unknown> = {}, o: { network?: Net } = {}) {
+  // ---- Paying in $WAFERMAP (Permit2; the tokens are burned) ----
+
+  /** Whether this wallet has approved Permit2 to move its $WAFERMAP (needed once before paying in $WAFERMAP). */
+  async wafermapApproved(): Promise<boolean> {
+    const a = (await this.client("robinhood").readContract({ address: WAFERMAP_TOKEN as `0x${string}`, abi: erc20Abi, functionName: "allowance", args: [this.address as `0x${string}`, PERMIT2 as `0x${string}`] })) as bigint;
+    return a >= 10n ** 30n;
+  }
+
+  /** Approves Permit2 (Uniswap's, at its canonical address) to move this wallet's $WAFERMAP: one on-chain
+   *  transaction on Robinhood Chain, paid in ETH. Each payment after that is a signature for one exact amount,
+   *  spendable only by Wafermap's relayer for two minutes. */
+  async approveWafermap(): Promise<string> {
+    const wallet = createWalletClient({ account: this.account, chain: CHAINS.robinhood, transport: http(this.rpc.robinhood) });
+    try {
+      const tx = await wallet.writeContract({ address: WAFERMAP_TOKEN as `0x${string}`, abi: erc20Abi, functionName: "approve", args: [PERMIT2 as `0x${string}`, 2n ** 256n - 1n] });
+      const rc = await this.client("robinhood").waitForTransactionReceipt({ hash: tx, timeout: 60_000 });
+      if (rc.status !== "success") throw new WafermapError("approve_failed", `The approval reverted: ${tx}`);
+      return tx;
+    } catch (e: any) {
+      if (e instanceof WafermapError) throw e;
+      throw new WafermapError("approve_failed", e?.shortMessage ?? e?.message ?? "The approval failed.");
+    }
+  }
+
+  async call(id: string, input: Record<string, unknown> = {}, o: { network?: Net; payIn?: "stablecoin" | "wafermap" } = {}) {
+    const inToken = o.payIn === "wafermap";
+    if (inToken && id.startsWith("m/")) throw new WafermapError("token_not_offered", "Marketplace listings are paid in USDG or USDC to their seller, not in $WAFERMAP.");
+    if (inToken && !(await this.wafermapApproved().catch(() => true))) throw new WafermapError("permit2_not_approved", "Paying in $WAFERMAP needs a one-time approval of Permit2. Run `wafermap approve-wafermap` (one transaction on Robinhood Chain, paid in ETH), then call again.");
     // X-Wafermap-Payer names this wallet so a $WAFERMAP holder is quoted the holder price, and the holder pass lets
     // a Pro holder's free calls apply (no payment is signed then). Both go to Wafermap only, never to third-party
     // services or marketplace sellers; the server checks the balance again itself.
     const pass = id.startsWith("m/") ? null : await this.holderPass();
-    const go = () => this.paidFetch("resource", id, `${this.baseUrl}/v1/${id}`, { method: "POST", headers: { "content-type": "application/json", "x-wafermap-payer": this.address, ...(pass ? { [PASS_HEADER]: pass } : {}) }, body: JSON.stringify(input) }, o.network);
+    const go = () => this.paidFetch("resource", id, `${this.baseUrl}/v1/${id}`, { method: "POST", headers: { "content-type": "application/json", "x-wafermap-payer": this.address, ...(pass ? { [PASS_HEADER]: pass } : {}) }, body: JSON.stringify(input) }, o.network, inToken ? "wafermap" : undefined);
     const settle = (r: Awaited<ReturnType<typeof go>>, out: any) => {
       if (!r.paid || !r.id) return;
       const status: PaymentStatus = r.res.status === 402 ? "refused" : r.res.ok ? "ok" : "failed";
@@ -357,7 +391,7 @@ export class Wafermap {
     const refused = this.rejected(res, out, paid);
     if (refused) throw refused;
     if (!res.ok) throw new WafermapError(out?.error?.code ?? "http_error", out?.error?.message ?? (typeof out?.error === "string" ? out.error : `HTTP ${res.status}`));
-    return out as { resource: string; result: any; receipt: { network: string; asset: string; amountUsd: number; payer: string; tx: string; ms: number } | null; free?: { wallet: string; left: number; perDay: number } };
+    return out as { resource: string; result: any; receipt: { network: string; asset: string; amountUsd: number; amountTokens?: number; burned?: boolean; payer: string; tx: string; ms: number } | null; free?: { wallet: string; left: number; perDay: number } };
   }
 
   // ---- Third-party x402 services ----

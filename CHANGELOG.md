@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.5 (2 Nov 2026)
+
+**Pay Wafermap in $WAFERMAP, at 50% off. The tokens are burned.**
+
+- `wafermap call <id> --pay wafermap` (MCP `wafermap_call` with `payIn: "wafermap"`, SDK `call(id, input, { payIn: "wafermap" })`) pays one of Wafermap's own resources in $WAFERMAP instead of USDG/USDC. $WAFERMAP has no EIP-3009, so the payment is a Uniswap Permit2 signature for one exact amount, spendable for two minutes only by Wafermap's relayer, which sends it to the dead address once the call succeeded. A failed call moves nothing.
+- `wafermap approve-wafermap`: the one-time Permit2 approval (one Robinhood Chain transaction, paid in ETH).
+- What the client checks before it signs, trusting the server for none of it: the spender is Wafermap's relayer as fixed in this release (`WAFERMAP_RELAYERS`); the option names the canonical Permit2, the $WAFERMAP token and the dead address; the amount is valued at a price this client reads itself (GeckoTerminal) and refused when it is worth more than the quote states. The caps count the higher of the two values.
+- Only `call()` to Wafermap ever signs a $WAFERMAP permit. `pay()` to third-party services never does, whatever they offer, because a Permit2 spender chooses where the tokens go.
+
 ## 0.4.4 (2 Nov 2026)
 
 **$WAFERMAP holder tiers.**
