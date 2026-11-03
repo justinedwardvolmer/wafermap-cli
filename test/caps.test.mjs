@@ -6,7 +6,10 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { generatePrivateKey } from "viem/accounts";
 import { pad, toEventSelector, toHex } from "viem";
-import { Wafermap, mergeLog, checkPayment, MAX_VALIDITY_SECONDS } from "../dist/index.js";
+import { Wafermap, mergeLog, checkPayment, checkSolanaPayment, MAX_VALIDITY_SECONDS } from "../dist/index.js";
+import { base58, base64 } from "@scure/base";
+const SOLANA_CAIP = "solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp";
+const SOLANA_USDC = "EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v";
 
 const USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
 const PAY_TO = "0x000000000000000000000000000000000000dEaD";
@@ -265,4 +268,144 @@ test("mergeLog(): old single-line entries pass through and new two-line records 
   const rows = mergeLog(log);
   assert.equal(rows.length, 2);
   assert.deepEqual([rows[1].status, rows[1].tx, rows[1].usd, rows[1].reported], ["ok", "0x3", 0.05, 0]);
+});
+
+// ---- Solana: what a payment logs, and checkSolanaPayment() against a fake Solana RPC ----
+
+const SOL_FEE_PAYER = "GVJJ7rdGiXr5xaYbRwRbjfaJL7fmwRygFi1H6aGqDveb";
+const SOL_PAY_TO = "HxkTiWGiFcY4jcRTVHgcoJePG7od39Uf9q3SfwcpYy2y";
+const SOL_PAYER = "5jztShsHQc7kGSzgvWdvB7pgTBsskibify6vmc4SyjFq";
+const SOL_PAYER_ATA = "Degjwx1jFR1x5ZoakzZ1ZREYuWwyRgB4aWok8roiRjkN"; // its USDC account, as seen on mainnet
+
+test("a Solana payment logs our signature, its memo, its blockhash and the slot it was read at", async () => {
+  let paid = null;
+  const server = createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => (body += c)).on("end", () => {
+      if (req.url === "/api/solana") {
+        const { id } = JSON.parse(body);
+        res.setHeader("content-type", "application/json");
+        return res.end(JSON.stringify({ jsonrpc: "2.0", id, result: { context: { slot: 4242 }, value: { blockhash: "11111111111111111111111111111111", lastValidBlockHeight: 345678 } } }));
+      }
+      const sig = req.headers["payment-signature"];
+      if (!sig) {
+        const quote = { x402Version: 2, resource: { url: req.url }, accepts: [{ scheme: "exact", network: SOLANA_CAIP, amount: "1000", asset: SOLANA_USDC, payTo: SOL_PAY_TO, maxTimeoutSeconds: 60, extra: { feePayer: SOL_FEE_PAYER } }] };
+        res.writeHead(402, { "payment-required": b64(quote), "content-type": "application/json" });
+        return res.end(JSON.stringify(quote));
+      }
+      paid = unb64(sig);
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ resource: "r", result: { ok: true } }));
+    });
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  try {
+    const { wm, log } = wallet(`http://127.0.0.1:${server.address().port}`, {}, { network: "solana" });
+    await wm.call("r");
+    const row = mergeLog(log)[0];
+    const tx = base64.decode(paid.payload.transaction);
+    // shortvec(2), the facilitator's empty slot, then ours
+    assert.equal(row.sig, base58.encode(tx.slice(65, 129)));
+    assert.match(row.memo, /^[0-9a-f]{32}$/);
+    assert.ok(new TextDecoder().decode(tx).includes(row.memo));
+    assert.equal(row.blockhash, "11111111111111111111111111111111");
+    assert.equal(row.slot, 4242);
+    // the public SDK shape is unchanged: blockhash() still gives a string
+    assert.equal(typeof (await wm.solana.blockhash()), "string");
+  } finally {
+    await new Promise((r) => (server.closeAllConnections(), server.close(r)));
+  }
+});
+
+/** A fake Solana RPC. `txs` maps a transaction id to { sigs, err, payer, pre, post }; `history` is
+ *  the wallet's USDC account history, newest first (paged by `before`); `blocks` maps a slot to its
+ *  { blockhash, blockHeight }; the finalized tip is `fin` = { absoluteSlot, blockHeight }.
+ *  `throttle` answers the first N calls with HTTP 429. */
+async function fakeSolana({ txs = {}, history = [], blocks = { 500: { blockhash: "BH", blockHeight: 1000 } }, fin = { absoluteSlot: 9000, blockHeight: 2000 }, throttle = 0 }) {
+  const calls = [];
+  const server = createServer((req, res) => {
+    let body = "";
+    req.on("data", (c) => (body += c)).on("end", () => {
+      const { id, method, params } = JSON.parse(body);
+      calls.push({ method, params });
+      res.setHeader("content-type", "application/json");
+      if (throttle-- > 0) {
+        res.statusCode = 429;
+        return res.end(JSON.stringify({ jsonrpc: "2.0", id, error: { code: 429, message: "Too many requests for a specific RPC call" } }));
+      }
+      let result = null;
+      if (method === "getTransaction") {
+        const t = txs[params[0]];
+        if (!/^[1-9A-HJ-NP-Za-km-z]+$/.test(params[0])) return res.end(JSON.stringify({ jsonrpc: "2.0", id, error: { code: -32602, message: "Invalid param: invalid signature" } }));
+        result = t ? { transaction: { signatures: t.sigs, message: { accountKeys: [SOL_FEE_PAYER, t.payer] } }, meta: { err: t.err ?? null, preTokenBalances: t.pre ?? [], postTokenBalances: t.post ?? [] } } : null;
+      } else if (method === "getSignaturesForAddress") {
+        assert.equal(params[0], SOL_PAYER_ATA, "searches the wallet's USDC account");
+        const i = params[1]?.before ? history.findIndex((x) => x.signature === params[1].before) + 1 : 0;
+        result = history.slice(i, i + (params[1]?.limit ?? 1000));
+      } else if (method === "getBlock") result = blocks[params[0]] ?? null;
+      else if (method === "getEpochInfo") result = fin;
+      res.end(JSON.stringify({ jsonrpc: "2.0", id, result }));
+    });
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  return { url: `http://127.0.0.1:${server.address().port}`, calls, close: () => new Promise((r) => server.close(r)) };
+}
+
+test("checkSolanaPayment(): used only with our signature on-chain; unused only once the chain is past the blockhash's age and the history was read back to its block", async () => {
+  const ours = "3".repeat(88);
+  // The blockhash names the block at slot 500, height 1000: valid until height 1150.
+  const entry = { payer: SOL_PAYER, sig: ours, memo: "abc123", blockhash: "BH", slot: 500 };
+  const old = { signature: "FUND", slot: 400, memo: null }; // the account was funded before the payment
+  const usdc = (amount) => [{ owner: SOL_PAYER, mint: SOLANA_USDC, uiTokenAmount: { amount } }];
+  const landed = { txs: { T2: { sigs: ["G", ours], payer: SOL_PAYER } }, history: [{ signature: "T2", slot: 510, memo: "[6] abc123" }, old] };
+  const cases = [
+    ["the server's tx carries our signature", { txs: { T1: { sigs: ["F", ours], payer: SOL_PAYER } } }, { ...entry, tx: "T1" }, "used"],
+    ["the server named someone else's tx: found by our signature", { ...landed, txs: { ...landed.txs, T1: { sigs: ["F", "x"], payer: SOL_PAYER } } }, { ...entry, tx: "T1" }, "used"],
+    ["the server named a malformed tx: found by our signature", landed, { ...entry, tx: "0xdead" }, "used"],
+    ["an RPC that leaves memo empty: still checked", { ...landed, history: [{ signature: "T2", slot: 510, memo: null }, old] }, entry, "used"],
+    ["landed with our signature and failed: nothing moved", { ...landed, txs: { T2: { sigs: ["G", ours], payer: SOL_PAYER, err: { InstructionError: [2, "x"] } } } }, entry, "unused"],
+    ["not found, finalized height past 1150", { history: [{ signature: "T9", slot: 520, memo: "[3] zzz" }, old], fin: { absoluteSlot: 9000, blockHeight: 1151 } }, entry, "unused"],
+    ["not found, finalized height exactly 1150: still landable", { history: [old], fin: { absoluteSlot: 9000, blockHeight: 1150 } }, entry, "pending"],
+    ["not found, finalized not even at the blockhash's block yet", { history: [old], fin: { absoluteSlot: 480, blockHeight: 990 } }, entry, "pending"],
+    ["a legacy line: the server's tx moved exactly the signed amount", { txs: { T1: { sigs: ["F", "s"], payer: SOL_PAYER, pre: usdc("5000"), post: usdc("4000") } } }, { payer: SOL_PAYER, usd: 0.001, tx: "T1" }, "used"],
+    ["a legacy line: a different amount proves nothing", { txs: { T1: { sigs: ["F", "s"], payer: SOL_PAYER, pre: usdc("5000"), post: usdc("3000") } } }, { payer: SOL_PAYER, usd: 0.001, tx: "T1" }, "unknown"],
+    ["a legacy line with no transaction: nothing to check by", {}, { payer: SOL_PAYER }, "unknown"],
+    ["no slot logged: nothing to anchor the search to", { history: [old], fin: { absoluteSlot: 9000, blockHeight: 5000 } }, { ...entry, slot: undefined }, "unknown"],
+    ["rate-limited twice, then answers", { throttle: 2, txs: { T1: { sigs: ["F", ours], payer: SOL_PAYER } } }, { ...entry, tx: "T1" }, "used"],
+  ];
+  for (const [name, chain, e, want] of cases) {
+    const c = await fakeSolana(chain);
+    try {
+      assert.equal(await checkSolanaPayment(e, c.url), want, name);
+    } finally {
+      await c.close();
+    }
+  }
+  // Never "unused" on a doubtful read: these throw, which the CLI shows as "error".
+  const expired = { absoluteSlot: 9000, blockHeight: 5000 };
+  const doubtful = [
+    ["the history ends before reaching the blockhash's block", { history: [{ signature: "T9", slot: 520, memo: "[3] zzz" }], fin: expired }, entry],
+    ["the history lists our candidate but the node cannot return it", { history: [{ signature: "T2", slot: 510, memo: "[6] abc123" }, old], fin: expired }, entry],
+    // a server that overstated the slot (to cut the search short) is caught: that block has another hash
+    ["the logged slot's block has another blockhash", { history: [{ signature: "T2", slot: 510, memo: "[6] abc123" }, old], blocks: { 600: { blockhash: "OTHER", blockHeight: 1100 } }, fin: expired }, { ...entry, slot: 600 }],
+  ];
+  for (const [name, chain, e] of doubtful) {
+    const c = await fakeSolana(chain);
+    try {
+      await assert.rejects(checkSolanaPayment(e, c.url), undefined, name);
+    } finally {
+      await c.close();
+    }
+  }
+  // The finalized tip is read first, and the history from a node at least that far along.
+  const c = await fakeSolana({ history: [{ signature: "X1", slot: 530, memo: "[3] nop" }, old], fin: { absoluteSlot: 777, blockHeight: 5000 } });
+  try {
+    assert.equal(await checkSolanaPayment(entry, c.url), "unused");
+    const order = c.calls.map((x) => x.method);
+    assert.ok(order.indexOf("getEpochInfo") < order.indexOf("getSignaturesForAddress"));
+    assert.equal(c.calls.find((x) => x.method === "getSignaturesForAddress").params[1].minContextSlot, 777);
+    assert.equal(order.filter((m) => m === "getTransaction").length, 0, "the memo rules out X1 without reading it");
+  } finally {
+    await c.close();
+  }
 });

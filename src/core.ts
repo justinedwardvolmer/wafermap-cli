@@ -11,7 +11,7 @@ import { createPublicClient, createWalletClient, erc20Abi, formatUnits, getAddre
 import { privateKeyToAccount } from "viem/accounts";
 import { arbitrum, base, polygon, robinhood } from "viem/chains";
 import { TOKENS, executeSwap, quoteSwap, resolveToken, type Net as SwapNet, type SwapQuote, type Token } from "../shared/swap";
-import { latestBlockhash, solanaBalances, solanaKeyFromEvm, type SolanaPayer } from "../shared/solana";
+import { checkSolanaPayment, latestBlockhash, latestBlockhashInfo, solanaBalances, solanaKeyFromEvm, type SolanaPayer } from "../shared/solana";
 import { CHAIN_KEYS, PAY_CHAINS, PERMIT2, WAFERMAP_TOKEN, x402fetch, X402Error, type ChainKey, type Requirement, type Signed } from "../shared/x402client";
 import { PASS_HEADER, decodePass, encodePass, makePass } from "../shared/pass";
 
@@ -41,6 +41,11 @@ export type SpendEntry = {
   /** EVM payments: the EIP-3009 nonce and expiry, to check on-chain whether it was ever used. */
   nonce?: string;
   validBefore?: number;
+  /** Solana payments (from 0.4.7): our signature, the memo, the blockhash and the slot it was read at. */
+  sig?: string;
+  memo?: string;
+  blockhash?: string;
+  slot?: number;
   /** What the server said it charged, for the record only. */
   reported?: number | null;
 };
@@ -134,11 +139,13 @@ const AUTH_USED = parseAbiItem("event AuthorizationUsed(address indexed authoriz
  * can never be charged. authorizationState is also true after cancelAuthorization, so a true is
  * confirmed by the AuthorizationUsed event: first in the receipt of the transaction the server
  * named, else in the blocks between signing and expiry, the only time it could have executed.
- * None there means the nonce was cancelled, never executed ("cancelled"). Solana payments and old
- * log lines without a nonce come back "unknown"; an RPC failure comes back "error".
+ * None there means the nonce was cancelled, never executed ("cancelled"). Solana payments are
+ * checked by checkSolanaPayment (shared/solana.ts), by default on the public Solana RPC. Old log
+ * lines with nothing to check by come back "unknown"; an RPC failure comes back "error".
  */
-export async function checkPayment(e: Pick<SpendEntry, "network" | "payer" | "nonce" | "validBefore"> & { at?: number; tx?: string | null }, rpc?: string): Promise<"used" | "cancelled" | "unused" | "pending" | "unknown" | "error"> {
-  if (e.network === "solana" || !e.nonce || !(e.network in CHAINS)) return "unknown";
+export async function checkPayment(e: Pick<SpendEntry, "network" | "payer" | "nonce" | "validBefore"> & Partial<Pick<SpendEntry, "sig" | "memo" | "blockhash" | "slot" | "usd">> & { at?: number; tx?: string | null }, rpc?: string): Promise<"used" | "cancelled" | "unused" | "pending" | "unknown" | "error"> {
+  if (e.network === "solana") return checkSolanaPayment(e, rpc).catch(() => "error" as const);
+  if (!e.nonce || !(e.network in CHAINS)) return "unknown";
   const chain = PAY_CHAINS.find((c) => c.key === e.network)!;
   try {
     const client = createPublicClient({ chain: CHAINS[e.network as EvmNet], transport: http(rpc) });
@@ -242,7 +249,7 @@ export class Wafermap {
     this.fetch = (input, init) => fetch(input, { ...init, signal: init?.signal ?? AbortSignal.timeout(this.timeoutMs) });
     const sol = o.solana ?? (o.privateKey ? solanaKeyFromEvm(o.privateKey) : null);
     const solRpc = this.rpc.solana ?? `${this.baseUrl}/api/solana`;
-    this.solana = sol ? { address: sol.address, sign: sol.sign, blockhash: () => latestBlockhash(solRpc, this.fetch) } : null;
+    this.solana = sol ? { address: sol.address, sign: sol.sign, blockhash: () => latestBlockhash(solRpc, this.fetch), blockhashInfo: () => latestBlockhashInfo(solRpc, this.fetch) } : null;
     this.solanaAddress = sol?.address ?? o.solanaAddress ?? null;
   }
 
@@ -291,7 +298,7 @@ export class Wafermap {
   /** Write the signed payment to the ledger before it leaves the machine. */
   private booked(kind: "resource" | "service", what: string, s: Signed): string {
     const id = crypto.randomUUID();
-    this.ledger.record({ at: Date.now(), kind, what, usd: s.req.usd, network: s.req.chain.key, tx: null, payer: s.from, id, status: "signed", ...(s.auth ? { nonce: s.auth.nonce, validBefore: s.auth.validBefore } : {}) });
+    this.ledger.record({ at: Date.now(), kind, what, usd: s.req.usd, network: s.req.chain.key, tx: null, payer: s.from, id, status: "signed", ...(s.auth ? { nonce: s.auth.nonce, validBefore: s.auth.validBefore } : {}), ...(s.sol ? { sig: s.sol.sig, memo: s.sol.memo, blockhash: s.sol.blockhash, ...(s.sol.slot !== undefined ? { slot: s.sol.slot } : {}) } : {}) });
     return id;
   }
 

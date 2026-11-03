@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.4.7 (4 Nov 2026)
+
+**`history --verify` checks Solana payments.** Until now they showed `unknown`.
+
+- Each Solana payment now logs what it can be found by later: the wallet's own signature (the second one in the transaction; the first, which names it on explorers, is the facilitator's), the memo, the blockhash and the slot it was read at.
+- `wafermap history --verify` reads a Solana RPC, the public one by default (`WAFERMAP_RPC_SOLANA` for another), never Wafermap's, and takes no number from the server that was paid:
+  - The payment is anchored to the block its blockhash names: the block at the logged slot must carry exactly that hash, or the check stops with `error`. The payment can land only after that block, and only until the chain is 150 blocks past it.
+  - `used`: a transaction carrying our signature landed and succeeded (the one the server named, or one found in the wallet's USDC account history).
+  - `unused`: the finalized chain is past the blockhash's last valid height (read first), and the history, read from a node at least that far along and back to the blockhash's block, has no transaction with our signature. Such a payment can never execute. A transaction that landed with our signature and failed moved nothing: also `unused`.
+  - `pending`: not found, and still able to land.
+  - `error`: anything the RPC could not establish for sure (a block or history it cannot return, a time-out). Never `unused` on a doubtful read.
+  - Solana lines logged before 0.4.7 have no signature: they are `used` when the server's transaction shows this wallet signing and its USDC going down by exactly the signed amount (and no other line was given the same transaction), otherwise `unknown`.
+- Reviewed adversarially twice before release. The fixes that came out of it: the expiry is read before the search; the cut-off is a block checked on-chain, not the local clock or a slot from Wafermap's RPC; a fresh blockhash the finalized chain has not reached yet reads `pending`, not `unused`.
+- Solana RPC reads have a 15-second limit and back off on rate limits.
+- SDK: `checkSolanaPayment()` and `SOLANA_PUBLIC_RPC` are exported; `checkPayment()` routes Solana lines to it. `SolanaPayer` gains an optional `blockhashInfo()`; `blockhash()` still returns a string.
+
 ## 0.4.6 (3 Nov 2026)
 
 **`history --verify` tells an executed payment from a cancelled one.** Thank you @GBLIN_Protocol for the catch.

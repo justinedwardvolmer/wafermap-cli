@@ -25,8 +25,15 @@ const CU_LIMIT = 20_000;
 const CU_PRICE_MICROLAMPORTS = 1n;
 const MAX_MEMO_BYTES = 256;
 
-/** Signs as one Solana address. `blockhash` returns a recent blockhash from any mainnet RPC. */
-export type SolanaPayer = { address: string; sign: (message: Uint8Array) => Uint8Array | Promise<Uint8Array>; blockhash: () => Promise<string> };
+/** Signs as one Solana address. `blockhash` returns a recent blockhash from any mainnet RPC. When
+ *  `blockhashInfo` is given it is used instead, and the slot the blockhash was read at is kept with
+ *  the payment: the payment cannot land before it, which bounds the search for it later. */
+export type SolanaPayer = {
+  address: string;
+  sign: (message: Uint8Array) => Uint8Array | Promise<Uint8Array>;
+  blockhash: () => Promise<string>;
+  blockhashInfo?: () => Promise<{ blockhash: string; slot: number }>;
+};
 
 const utf8 = (s: string) => new TextEncoder().encode(s);
 const concat = (...parts: Uint8Array[]) => {
@@ -96,6 +103,16 @@ export type SolanaQuote = { amount: string; payTo: string; asset: string; feePay
 
 /** The base64 wire transaction for an x402 `exact` payment on Solana, signed by `payer` only. */
 export async function solanaPayment(payer: SolanaPayer, q: SolanaQuote): Promise<string> {
+  return (await solanaPaymentSigned(payer, q)).transaction;
+}
+
+/** What a signed Solana payment leaves to check it by later: our signature (the second one in the
+ *  transaction; the first, which names it on explorers, is the facilitator's and unknown until it
+ *  submits), its memo, its blockhash (once that is no longer valid the payment can never execute)
+ *  and, when known, the slot the blockhash was read at. */
+export type SolanaSigned = { transaction: string; signature: string; memo: string; blockhash: string; slot?: number };
+
+export async function solanaPaymentSigned(payer: SolanaPayer, q: SolanaQuote): Promise<SolanaSigned> {
   if (q.asset !== SOLANA_USDC) throw new Error("Only USDC is paid on Solana.");
   if (!isSolanaAddress(q.feePayer) || !isSolanaAddress(q.payTo)) throw new Error("The quote has no valid Solana fee payer or recipient.");
   if (q.feePayer === payer.address) throw new Error("The fee payer cannot be the paying wallet.");
@@ -115,17 +132,24 @@ export async function solanaPayment(payer: SolanaPayer, q: SolanaQuote): Promise
     { program: TOKEN_PROGRAM, accounts: [source, q.asset, dest, payer.address], data: concat(Uint8Array.of(12), le(BigInt(q.amount), 8), Uint8Array.of(USDC_DECIMALS)) },
     { program: MEMO_PROGRAM, accounts: [], data: memo },
   ];
+  const bh = payer.blockhashInfo ? await payer.blockhashInfo() : { blockhash: await payer.blockhash() };
   const message = concat(
     Uint8Array.of(0x80, 2, 1, 4), // v0; 2 signatures, 1 of them readonly; 4 readonly non-signers
     shortvec(keys.length),
     ...keys.map((k) => base58.decode(k)),
-    base58.decode(await payer.blockhash()),
+    base58.decode(bh.blockhash),
     shortvec(ixs.length),
     ...ixs.map((ix) => concat(Uint8Array.of(at(ix.program)), shortvec(ix.accounts.length), Uint8Array.from(ix.accounts.map(at)), shortvec(ix.data.length), ix.data)),
     shortvec(0), // no address lookup tables
   );
   const signature = await payer.sign(message);
-  return base64.encode(concat(shortvec(2), new Uint8Array(64), signature, message));
+  return {
+    transaction: base64.encode(concat(shortvec(2), new Uint8Array(64), signature, message)),
+    signature: base58.encode(signature),
+    memo: new TextDecoder().decode(memo),
+    blockhash: bh.blockhash,
+    ...("slot" in bh && Number.isFinite(bh.slot) ? { slot: bh.slot } : {}),
+  };
 }
 
 // ---- Reads, through any Solana JSON-RPC endpoint (Wafermap serves one at /api/solana) ----
@@ -138,7 +162,116 @@ export async function solanaRpc(url: string, method: string, params: unknown[], 
   return j.result;
 }
 
-export const latestBlockhash = async (url: string, f?: typeof fetch): Promise<string> => (await solanaRpc(url, "getLatestBlockhash", [{ commitment: "confirmed" }], f)).value.blockhash;
+export const latestBlockhash = async (url: string, f?: typeof fetch): Promise<string> => (await latestBlockhashInfo(url, f)).blockhash;
+export const latestBlockhashInfo = async (url: string, f?: typeof fetch): Promise<{ blockhash: string; slot: number }> => {
+  const r = await solanaRpc(url, "getLatestBlockhash", [{ commitment: "confirmed" }], f);
+  return { blockhash: r.value.blockhash, slot: Number(r.context?.slot) };
+};
+
+/** The public Solana RPC that `checkSolanaPayment` reads by default: not Wafermap's, so the answer
+ *  does not depend on the server that was paid. */
+export const SOLANA_PUBLIC_RPC = "https://api.mainnet-beta.solana.com";
+
+const READ_TIMEOUT_MS = 15_000;
+
+/** A Solana RPC read with a time limit, retried with growing waits when a free endpoint rate-limits. */
+async function solanaRead(url: string, method: string, params: unknown[], f: typeof fetch = fetch): Promise<any> {
+  const timed: typeof fetch = (input, init) => f(input, { ...init, signal: AbortSignal.timeout(READ_TIMEOUT_MS) });
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await solanaRpc(url, method, params, timed);
+    } catch (e: any) {
+      if (attempt >= 6 || !/429|rate|too many/i.test(String(e?.message))) throw e;
+      await new Promise((r) => setTimeout(r, 1000 * 2 ** attempt * (0.75 + Math.random() / 2)));
+    }
+  }
+}
+
+export type SolanaCheck = { payer: string; usd?: number; tx?: string | null; sig?: string; memo?: string; blockhash?: string; slot?: number };
+
+/** Did this transaction carry our payment, and did it succeed? null: the RPC does not have it. */
+async function txOutcome(url: string, tx: string, e: SolanaCheck, f?: typeof fetch): Promise<"ok" | "failed" | "other" | null> {
+  const t = await solanaRead(url, "getTransaction", [tx, { encoding: "json", maxSupportedTransactionVersion: 0, commitment: "confirmed" }], f);
+  if (!t) return null;
+  const sigs: string[] = t.transaction?.signatures ?? [];
+  const keys: string[] = t.transaction?.message?.accountKeys ?? [];
+  // With our signature on record, it must be in this transaction. Without it (payments logged
+  // before 0.4.7), the wallet must be its second signer and its USDC must have gone down by the
+  // amount it signed for.
+  if (e.sig ? !sigs.includes(e.sig) : keys[1] !== e.payer) return "other";
+  if (t.meta?.err) return "failed";
+  if (!e.sig) {
+    const bal = (list: any[]) => BigInt(list?.find((b) => b.owner === e.payer && b.mint === SOLANA_USDC)?.uiTokenAmount?.amount ?? "0");
+    const drop = bal(t.meta?.preTokenBalances) - bal(t.meta?.postTokenBalances);
+    if (drop <= 0n || (e.usd !== undefined && drop !== BigInt(Math.round(e.usd * 1e6)))) return "other";
+  }
+  return "ok";
+}
+
+/** A blockhash can be used until the chain is this many blocks past the block it names. */
+const BLOCKHASH_MAX_AGE = 150;
+
+/**
+ * Was a signed Solana payment ever executed? Read from a Solana RPC (by default the public one, not
+ * Wafermap's), and every number it rests on is checked on that RPC, not taken from the server
+ * that was paid.
+ *  - The transaction the server named, if it carries our signature: "used" when it succeeded.
+ *  - Otherwise the payment is anchored to the block its blockhash names: the block at the logged
+ *    slot must have exactly that hash. The payment can only land after that slot, and only until
+ *    the chain is BLOCKHASH_MAX_AGE blocks past it. Then, with the finalized height H at slot S:
+ *    the wallet's USDC account history, read from a node at slot S or later, back to that slot,
+ *    is searched for our signature. Found: "used" (or "unused" if it landed and failed: nothing
+ *    moved, and it cannot land again). Not found: "unused" when H is past the last valid height
+ *    (any landing would then be final and in that history), else "pending".
+ *  - Anything that cannot be established that way throws (the CLI shows "error"); it is never
+ *    "unused". Lines from before 0.4.7 have no signature: only the server's transaction can prove
+ *    them ("used"), else "unknown".
+ */
+export async function checkSolanaPayment(e: SolanaCheck, url = SOLANA_PUBLIC_RPC, f?: typeof fetch): Promise<"used" | "unused" | "pending" | "unknown"> {
+  if (e.tx) {
+    // A malformed or unknown id from the server is no answer either way: fall through to the search.
+    const o = await txOutcome(url, e.tx, e, f).catch(() => null);
+    if (o === "ok") return "used";
+    if (o === "failed" && e.sig) return "unused";
+  }
+  if (!e.sig || !e.blockhash || !Number.isSafeInteger(e.slot) || e.slot! <= 0) return "unknown";
+  const slot = e.slot!;
+
+  const block = await solanaRead(url, "getBlock", [slot, { commitment: "confirmed", transactionDetails: "none", rewards: false, maxSupportedTransactionVersion: 0 }], f);
+  if (!block || block.blockhash !== e.blockhash || !Number.isSafeInteger(block.blockHeight)) throw new Error("The chain has no block with this payment's blockhash at the logged slot.");
+  const lastValidHeight = block.blockHeight + BLOCKHASH_MAX_AGE;
+
+  const fin = await solanaRead(url, "getEpochInfo", [{ commitment: "finalized" }], f);
+  const S = Number(fin?.absoluteSlot);
+  const H = Number(fin?.blockHeight);
+  if (!Number.isSafeInteger(S) || !Number.isSafeInteger(H)) throw new Error("The RPC did not give the finalized height.");
+  const expired = H > lastValidHeight;
+
+  let before: string | undefined;
+  let reached = false;
+  search: for (let page = 0; page < 20; page++) {
+    const list: any[] = await solanaRead(url, "getSignaturesForAddress", [ataOf(e.payer), { limit: 1000, commitment: "confirmed", minContextSlot: S, ...(before ? { before } : {}) }], f);
+    if (!Array.isArray(list)) throw new Error("The RPC did not return the wallet's history.");
+    for (const x of list) {
+      if (!Number.isSafeInteger(x.slot)) throw new Error("The RPC returned history without slots.");
+      if (x.slot <= slot) {
+        reached = true; // the payment cannot be in this block or any earlier one
+        break search;
+      }
+      // A memo that is there and differs rules the entry out; a missing one does not.
+      if (e.memo && typeof x.memo === "string" && x.memo && !x.memo.includes(e.memo)) continue;
+      const o = await txOutcome(url, x.signature, e, f);
+      if (o === "ok") return "used";
+      if (o === "failed") return "unused";
+      if (o === null) throw new Error("The RPC lists a transaction it cannot return.");
+    }
+    if (list.length < 1000) break;
+    before = list[list.length - 1].signature;
+  }
+  // The paying account was funded before the payment, so a complete history reaches back past it.
+  if (!reached) throw new Error("Could not read the wallet's history back to this payment.");
+  return expired ? "unused" : "pending";
+}
 
 /** USDC (6 decimals) and SOL balances of a wallet. A wallet that never held USDC has no token
  *  account: 0. Read with getAccountInfo, which free public RPCs serve (getTokenAccountBalance is

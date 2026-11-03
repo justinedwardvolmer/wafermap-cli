@@ -1,4 +1,4 @@
-import { SOLANA_CAIP, SOLANA_USDC, solanaPayment, type SolanaPayer } from "./solana";
+import { SOLANA_CAIP, SOLANA_USDC, solanaPaymentSigned, type SolanaPayer } from "./solana";
 
 // A small x402 buyer used by the web app, the CLI, the SDK and the MCP server.
 // It pays any x402 endpoint (Wafermap's own /v1 or a third-party service found through
@@ -204,18 +204,21 @@ const randomNonce = (): Hex => ("0x" + [...crypto.getRandomValues(new Uint8Array
 
 /** Sign the payment for the exact amount and return the header to send: an EIP-3009 transfer on
  *  EVM chains, a partially signed USDC transfer transaction on Solana. */
-export async function signPayment(signer: Signer, req: Requirement, resource: any, solana?: SolanaPayer): Promise<{ name: string; value: string; auth?: SignedAuth }> {
+export async function signPayment(signer: Signer, req: Requirement, resource: any, solana?: SolanaPayer): Promise<{ name: string; value: string; auth?: SignedAuth; sol?: SignedSol }> {
   if (req.chain.vm === "svm") {
     if (!solana) throw new X402Error("no_solana_wallet", "This payment is on Solana and no Solana wallet was given.");
     let transaction: string;
+    let sol: SignedSol;
     try {
-      transaction = await solanaPayment(solana, { amount: req.amount, payTo: req.payTo, asset: req.asset, feePayer: req.extra.feePayer!, memo: req.extra.memo });
+      const s = await solanaPaymentSigned(solana, { amount: req.amount, payTo: req.payTo, asset: req.asset, feePayer: req.extra.feePayer!, memo: req.extra.memo });
+      transaction = s.transaction;
+      sol = { sig: s.signature, memo: s.memo, blockhash: s.blockhash, ...(s.slot !== undefined ? { slot: s.slot } : {}) };
     } catch (e: any) {
       if (e?.name === "TimeoutError" || e?.cause?.name === "TimeoutError") throw e; // the caller reports time-outs
       throw new X402Error("sign_failed", e?.message ?? "Could not build the Solana payment.");
     }
-    if (req.version === 1) return { name: "X-PAYMENT", value: b64encode(JSON.stringify({ x402Version: 1, scheme: "exact", network: req.raw.network, payload: { transaction } })) };
-    return { name: "PAYMENT-SIGNATURE", value: b64encode(JSON.stringify({ x402Version: 2, resource, accepted: req.raw, payload: { transaction } })) };
+    if (req.version === 1) return { name: "X-PAYMENT", value: b64encode(JSON.stringify({ x402Version: 1, scheme: "exact", network: req.raw.network, payload: { transaction } })), sol };
+    return { name: "PAYMENT-SIGNATURE", value: b64encode(JSON.stringify({ x402Version: 2, resource, accepted: req.raw, payload: { transaction } })), sol };
   }
   const nonce = randomNonce();
   const validBefore = BigInt(Math.floor(Date.now() / 1000) + Math.min(req.maxTimeoutSeconds, MAX_VALIDITY_SECONDS));
@@ -247,7 +250,10 @@ export function readSettlement(res: Response): { tx?: string; network?: string; 
 /** What an EVM payment authorized on-chain: anyone holding it can execute it until `validBefore`
  *  (unix seconds), once. `authorizationState(from, nonce)` on the token says whether it was used. */
 export type SignedAuth = { nonce: Hex; validBefore: number };
-export type Signed = { req: Requirement; from: string; auth?: SignedAuth; token?: { amount: string } };
+/** What a Solana payment can be found by on-chain later (see checkSolanaPayment): our signature, its
+ *  memo, its blockhash and the slot that blockhash was read at. */
+export type SignedSol = { sig: string; memo: string; blockhash: string; slot?: number };
+export type Signed = { req: Requirement; from: string; auth?: SignedAuth; sol?: SignedSol; token?: { amount: string } };
 export type PaidCall = { res: Response; paid: (Signed & { tx: string | null }) | null };
 
 /**
@@ -292,7 +298,7 @@ export async function x402fetch(
   const svm = req.chain.vm === "svm";
   const signer = svm ? null : typeof opts.signer === "function" ? await opts.signer() : opts.signer;
   const header = await signPayment(signer!, req, quote.resource, opts.solana);
-  const signed: Signed = { req, from: svm ? opts.solana!.address : signer!.address, ...(header.auth ? { auth: header.auth } : {}) };
+  const signed: Signed = { req, from: svm ? opts.solana!.address : signer!.address, ...(header.auth ? { auth: header.auth } : {}), ...(header.sol ? { sol: header.sol } : {}) };
   opts.onSigned?.(signed);
   const headers = new Headers(init.headers);
   headers.set(header.name, header.value);
