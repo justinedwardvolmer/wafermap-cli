@@ -5,6 +5,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import { generatePrivateKey } from "viem/accounts";
+import { pad, toEventSelector, toHex } from "viem";
 import { Wafermap, mergeLog, checkPayment, MAX_VALIDITY_SECONDS } from "../dist/index.js";
 
 const USDC_BASE = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
@@ -180,6 +181,59 @@ test("the signed authorization is for exactly the quoted amount and recipient, a
 test("checkPayment(): Solana and lines without a nonce are reported as unknown", async () => {
   assert.equal(await checkPayment({ network: "solana", payer: "x", nonce: "0x1", validBefore: 1 }), "unknown");
   assert.equal(await checkPayment({ network: "base", payer: "0x0000000000000000000000000000000000000001" }), "unknown");
+});
+
+// A fake chain for checkPayment(): authorizationState is true, block n has timestamp n*2, and
+// AuthorizationUsed for the nonce appears in the receipt and/or the logs as configured.
+async function fakeChain({ inReceipt, inLogs, payer, nonce }) {
+  const USDC = "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913";
+  const log = { address: USDC, topics: [toEventSelector("event AuthorizationUsed(address indexed authorizer, bytes32 indexed nonce)"), pad(payer).toLowerCase(), nonce], data: "0x", blockNumber: "0x10", transactionHash: "0x" + "ab".repeat(32), transactionIndex: "0x0", blockHash: "0x" + "cd".repeat(32), logIndex: "0x0", removed: false };
+  const head = 1_000_000;
+  const calls = [];
+  const server = createServer((req, res) => {
+    let body = "";
+    req.on("data", (d) => (body += d)).on("end", () => {
+      const { id, method, params } = JSON.parse(body);
+      calls.push(method);
+      const block = (n) => ({ number: toHex(n), timestamp: toHex(n * 2), hash: "0x" + "cd".repeat(32), parentHash: "0x" + "00".repeat(32), transactions: [], logsBloom: "0x" + "00".repeat(256), gasLimit: "0x1", gasUsed: "0x0", miner: USDC, extraData: "0x", difficulty: "0x0", size: "0x1", uncles: [], baseFeePerGas: "0x1" });
+      const result =
+        method === "eth_call" ? "0x" + "0".repeat(63) + "1"
+        : method === "eth_getTransactionReceipt" ? { status: "0x1", logs: inReceipt ? [log] : [], transactionHash: params[0], blockNumber: "0x10", blockHash: log.blockHash, transactionIndex: "0x0", from: payer, to: USDC, cumulativeGasUsed: "0x1", gasUsed: "0x1", effectiveGasPrice: "0x1", logsBloom: "0x" + "00".repeat(256), type: "0x2", contractAddress: null }
+        : method === "eth_getBlockByNumber" ? block(params[0] === "latest" ? head : Number(params[0]))
+        : method === "eth_getLogs" ? (inLogs ? [log] : [])
+        : null;
+      res.setHeader("content-type", "application/json");
+      res.end(JSON.stringify({ jsonrpc: "2.0", id, result }));
+    });
+  });
+  await new Promise((r) => server.listen(0, "127.0.0.1", r));
+  return { url: `http://127.0.0.1:${server.address().port}`, calls, close: () => new Promise((r) => server.close(r)) };
+}
+
+test("checkPayment(): authorizationState true is 'used' only with the AuthorizationUsed event, else 'cancelled'", async () => {
+  const payer = "0x0000000000000000000000000000000000000abc";
+  const nonce = "0x" + "11".repeat(32);
+  const entry = { network: "base", payer, nonce, at: 1_900_000 * 1000, validBefore: 1_900_090, tx: "0x" + "ee".repeat(32) };
+  for (const [opts, want] of [
+    [{ inReceipt: true, inLogs: false }, "used"],
+    [{ inReceipt: false, inLogs: true }, "used"],
+    [{ inReceipt: false, inLogs: false }, "cancelled"],
+  ]) {
+    const c = await fakeChain({ ...opts, payer, nonce });
+    try {
+      assert.equal(await checkPayment(entry, c.url), want, JSON.stringify(opts));
+      if (opts.inReceipt) assert.ok(!c.calls.includes("eth_getLogs"), "the receipt is enough");
+    } finally {
+      await c.close();
+    }
+  }
+  // no tx and no signing time: nothing to bound the search with, so no guess
+  const c = await fakeChain({ inReceipt: false, inLogs: false, payer, nonce });
+  try {
+    assert.equal(await checkPayment({ network: "base", payer, nonce, validBefore: 1_900_090 }, c.url), "error");
+  } finally {
+    await c.close();
+  }
 });
 
 test("daily cap: separate wallet instances sharing one ledger (two MCP clients, or CLI + MCP) cannot both pass it", async () => {

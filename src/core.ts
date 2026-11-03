@@ -7,7 +7,7 @@
 // swaps are checked against a per-swap cap. The daily cap counts what this wallet signed, at the
 // full signed amount, the moment it is signed: never what a server reports it charged.
 // Nothing is ever sent to Wafermap but the signed payment header the x402 protocol requires.
-import { createPublicClient, createWalletClient, erc20Abi, formatUnits, getAddress, http, isAddress, parseUnits, type Hex, type LocalAccount, type PublicClient } from "viem";
+import { createPublicClient, createWalletClient, erc20Abi, formatUnits, getAddress, http, isAddress, pad, parseAbiItem, parseUnits, toEventSelector, type Hex, type LocalAccount, type PublicClient } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import { arbitrum, base, polygon, robinhood } from "viem/chains";
 import { TOKENS, executeSwap, quoteSwap, resolveToken, type Net as SwapNet, type SwapQuote, type Token } from "../shared/swap";
@@ -102,20 +102,77 @@ export function mergeLog(entries: SpendEntry[]): SpendEntry[] {
     });
 }
 
+/** The block nearest to a Unix time: the last one at or before it ("from"), or the first one at or after it ("to").
+ *  Interpolation search, a handful of getBlock calls; stops once the bracket is under 20 blocks. */
+type BlockReader = { getBlock(a?: { blockNumber: bigint }): Promise<{ number: bigint; timestamp: bigint }> };
+async function blockAt(client: BlockReader, ts: number, side: "from" | "to", latest: { number: bigint; timestamp: bigint }): Promise<bigint> {
+  if (ts >= Number(latest.timestamp)) return latest.number;
+  let hi = latest;
+  let lo = await client.getBlock({ blockNumber: latest.number > 100_000n ? latest.number - 100_000n : 0n });
+  while (Number(lo.timestamp) > ts && lo.number > 0n) {
+    const back = (hi.number - lo.number) * 4n;
+    hi = lo;
+    lo = await client.getBlock({ blockNumber: lo.number > back ? lo.number - back : 0n });
+  }
+  for (let i = 0; i < 20 && hi.number - lo.number > 20n; i++) {
+    const span = Number(hi.timestamp - lo.timestamp) || 1;
+    let guess = lo.number + BigInt(Math.floor((Number(hi.number - lo.number) * (ts - Number(lo.timestamp))) / span));
+    if (guess <= lo.number) guess = lo.number + 1n;
+    if (guess >= hi.number) guess = hi.number - 1n;
+    const b = await client.getBlock({ blockNumber: guess });
+    if (Number(b.timestamp) <= ts) lo = b;
+    else hi = b;
+  }
+  return side === "from" ? lo.number : hi.number;
+}
+
+const AUTH_USED = parseAbiItem("event AuthorizationUsed(address indexed authorizer, bytes32 indexed nonce)");
+
 /**
  * Was a signed payment ever executed? Reads the token contract (EIP-3009 authorizationState),
  * so the answer does not depend on any server and needs no key. "unused" after expiry means it
- * can never be charged. Solana payments and old log lines without a nonce come back "unknown"; an RPC
- * failure comes back "error".
+ * can never be charged. authorizationState is also true after cancelAuthorization, so a true is
+ * confirmed by the AuthorizationUsed event: first in the receipt of the transaction the server
+ * named, else in the blocks between signing and expiry, the only time it could have executed.
+ * None there means the nonce was cancelled, never executed ("cancelled"). Solana payments and old
+ * log lines without a nonce come back "unknown"; an RPC failure comes back "error".
  */
-export async function checkPayment(e: Pick<SpendEntry, "network" | "payer" | "nonce" | "validBefore">, rpc?: string): Promise<"used" | "unused" | "pending" | "unknown" | "error"> {
+export async function checkPayment(e: Pick<SpendEntry, "network" | "payer" | "nonce" | "validBefore"> & { at?: number; tx?: string | null }, rpc?: string): Promise<"used" | "cancelled" | "unused" | "pending" | "unknown" | "error"> {
   if (e.network === "solana" || !e.nonce || !(e.network in CHAINS)) return "unknown";
   const chain = PAY_CHAINS.find((c) => c.key === e.network)!;
   try {
     const client = createPublicClient({ chain: CHAINS[e.network as EvmNet], transport: http(rpc) });
     const used = await client.readContract({ address: chain.stable as Hex, abi: AUTH_STATE_ABI, functionName: "authorizationState", args: [e.payer as Hex, e.nonce as Hex] });
-    if (used) return "used";
-    return e.validBefore && Date.now() / 1000 > e.validBefore ? "unused" : "pending";
+    if (!used) return e.validBefore && Date.now() / 1000 > e.validBefore ? "unused" : "pending";
+    const isOurs = (l: { address: string; topics: readonly string[] }) =>
+      l.address.toLowerCase() === chain.stable.toLowerCase() &&
+      l.topics[0] === toEventSelector(AUTH_USED) &&
+      l.topics[1]?.toLowerCase() === pad(e.payer as Hex).toLowerCase() &&
+      l.topics[2]?.toLowerCase() === e.nonce!.toLowerCase();
+    if (e.tx && /^0x[0-9a-fA-F]{64}$/.test(e.tx)) {
+      const receipt = await client.getTransactionReceipt({ hash: e.tx as Hex }).catch(() => null);
+      if (receipt?.status === "success" && receipt.logs.some(isOurs)) return "used";
+    }
+    // Not in that receipt: search the window it could have executed in (signing time to expiry).
+    if (!e.validBefore || !e.at) return "error";
+    const latest = await client.getBlock();
+    const fromBlock = await blockAt(client as unknown as BlockReader, Math.floor(e.at / 1000) - 60, "from", latest);
+    const toBlock = await blockAt(client as unknown as BlockReader, e.validBefore + 30, "to", latest);
+    // Public RPCs cap getLogs by range and rate, so ask in 50-block pieces and retry a refused piece.
+    for (let start = fromBlock; start <= toBlock; start += 50n) {
+      const end = start + 49n < toBlock ? start + 49n : toBlock;
+      for (let attempt = 0; ; attempt++) {
+        try {
+          const logs = await client.getLogs({ address: chain.stable as Hex, event: AUTH_USED, args: { authorizer: e.payer as Hex, nonce: e.nonce as Hex }, fromBlock: start, toBlock: end });
+          if (logs.length) return "used";
+          break;
+        } catch (err) {
+          if (attempt >= 3) throw err;
+          await new Promise((r) => setTimeout(r, 1500 * (attempt + 1)));
+        }
+      }
+    }
+    return "cancelled";
   } catch {
     return "error"; // the RPC could not answer: the payment may or may not have been executed
   }

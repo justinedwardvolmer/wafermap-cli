@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.6 (3 Nov 2026)
+
+**`history --verify` tells an executed payment from a cancelled one.** Thank you @GBLIN_Protocol for the catch.
+
+- EIP-3009 `authorizationState` is true both after a payment is executed and after its nonce is cancelled (`cancelAuthorization`), so a cancelled nonce used to read as `used`. The wallet never cancels on its own, but a nonce cancelled by hand would have been shown as paid.
+- A `true` is now confirmed by the token contract's `AuthorizationUsed` event for that payer and nonce: first in the receipt of the settlement transaction the server named, otherwise in the blocks between signing and expiry, the only time the payment could have executed. Found: `used`. Not found: `cancelled` (spent nonce, no transfer). If the RPC cannot answer, the result is `error`, never a guess. Base's public RPC refuses log searches, so a Base payment with no settlement transaction on record needs `WAFERMAP_RPC_BASE` set to another RPC.
+- `history --verify` checks four payments at a time instead of all at once, so public RPCs stop refusing long histories.
+- SDK: `checkPayment()` returns the new `"cancelled"` state and takes the entry's `at` and `tx` when given.
+
 ## 0.4.5 (2 Nov 2026)
 
 **Pay Wafermap in $WAFERMAP, at 50% off. The tokens are burned.**

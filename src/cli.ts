@@ -238,7 +238,17 @@ async function main() {
       // --verify asks each token contract whether the signed payment was ever executed.
       const verify = a.flags.verify !== undefined;
       const RPC: Partial<Record<Net, string | undefined>> = { robinhood: process.env.WAFERMAP_RPC_ROBINHOOD, base: process.env.WAFERMAP_RPC_BASE, arbitrum: process.env.WAFERMAP_RPC_ARBITRUM, polygon: process.env.WAFERMAP_RPC_POLYGON };
-      const chain = verify ? await Promise.all(rows.map((e) => (e.kind === "swap" ? null : checkPayment(e, RPC[e.network])))) : [];
+      // four at a time: public RPCs refuse bursts
+      const chain: (Awaited<ReturnType<typeof checkPayment>> | null)[] = [];
+      if (verify) {
+        let next = 0;
+        await Promise.all(Array.from({ length: 4 }, async () => {
+          while (next < rows.length) {
+            const i = next++;
+            chain[i] = rows[i].kind === "swap" ? null : await checkPayment(rows[i], RPC[rows[i].network]);
+          }
+        }));
+      }
       rows.forEach((e, i) => {
         const state = [e.status, chain[i] ? `on-chain: ${chain[i]}` : null].filter(Boolean).join(", ");
         console.log(`${new Date(e.at).toISOString().slice(0, 16).replace("T", " ")}  ${e.kind.padEnd(8)}  ${e.kind === "swap" ? "      " : `$${e.usd}`.padEnd(8)}  ${e.network.padEnd(9)}  ${e.what}${state ? `  [${state}]` : ""}${e.tx ? `  ${EXPLORER(e.network)}/tx/${e.tx}` : ""}`);
@@ -249,7 +259,8 @@ async function main() {
 Total $${total.toFixed(4)} in ${pays.length} payments. From 0.3.3 every payment counts at its full signed amount; older lines show what the server reported.`);
       if (verify) {
         const never = rows.filter((e, i) => e.kind !== "swap" && chain[i] === "unused").reduce((s, e) => s + e.usd, 0);
-        console.log(`On-chain: $${never.toFixed(4)} of that was signed but never executed and has expired. "unknown" = Solana or an older log line; "error" = the RPC did not answer, try again.`);
+        const cancelled = rows.filter((e, i) => e.kind !== "swap" && chain[i] === "cancelled").reduce((s, e) => s + e.usd, 0);
+        console.log(`On-chain: $${never.toFixed(4)} of that was signed but never executed and has expired${cancelled ? `, and $${cancelled.toFixed(4)} was cancelled by this wallet before it executed` : ""}. "used" = the token contract logged the transfer (AuthorizationUsed); "cancelled" = the nonce is spent but never executed (cancelAuthorization); "unknown" = Solana or an older log line; "error" = the RPC did not answer, try again (Base's public RPC refuses log searches: for a payment with no transaction on record, set WAFERMAP_RPC_BASE to your own RPC).`);
       } else console.log("Add --verify to check on-chain which signed payments were executed.");
       return;
     }
