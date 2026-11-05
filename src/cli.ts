@@ -10,7 +10,7 @@ import { solanaKeyFromEvm } from "../shared/solana";
 import { HOME, config, hasWallet, keystoreAddress, keystoreSolana, loadKey, rememberSolana, saveConfig, saveKey, spendLog } from "./store.js";
 import { VERSION } from "./version.js";
 
-const HELP = `wafermap ${VERSION}: an x402 wallet for agents (Robinhood Chain, Solana, Base, Arbitrum, Polygon)
+const HELP = `wafermap ${VERSION}: an x402 wallet for agents (Robinhood Chain, Solana, Base, Arbitrum, Polygon, Arc, Soneium)
 
 Wallet
   wafermap init [--import]              create (or import) the agent wallet, encrypted with a password
@@ -37,7 +37,7 @@ Trade
 Agents
   wafermap mcp                          run as an MCP server (stdio); password from \`wafermap keychain on\` or WAFERMAP_PASSWORD
 
-Common flags: --network robinhood|solana|base|arbitrum|polygon   --yes (skip the confirmation)
+Common flags: --network robinhood|solana|base|arbitrum|polygon|arc|soneium   --yes (skip the confirmation)
 Files live in ${HOME}. Docs: https://wafermap.xyz/docs#cli`;
 
 type Args = { _: string[]; flags: Record<string, string | true> };
@@ -155,7 +155,7 @@ async function main() {
       console.log(`✓ Agent wallet ${acct.address}
   Solana address ${sol} (derived from the same key)
   Key encrypted in ${HOME}/keystore.json. Forget the password and the key is gone: run \`wafermap export-key\` to back it up.
-  Fund it with a few dollars of USDC on Solana (Solana address), or USDG on Robinhood Chain or USDC on Base, Arbitrum or Polygon (EVM address). Payments are gasless; swaps need a little ETH.
+  Fund it with a few dollars of USDC on Solana (Solana address), or USDG on Robinhood Chain or USDC on Base, Arbitrum, Polygon, Arc or Soneium (EVM address). Payments are gasless; swaps need a little ETH.
   Caps: $0.10 per payment, $1 per day, $25 per swap. Change with \`wafermap limits\`.`);
       return;
     }
@@ -237,7 +237,7 @@ async function main() {
       if (!rows.length) return console.log(`Nothing in the last ${days} days.`);
       // --verify asks each token contract whether the signed payment was ever executed.
       const verify = a.flags.verify !== undefined;
-      const RPC: Partial<Record<Net, string | undefined>> = { robinhood: process.env.WAFERMAP_RPC_ROBINHOOD, base: process.env.WAFERMAP_RPC_BASE, arbitrum: process.env.WAFERMAP_RPC_ARBITRUM, polygon: process.env.WAFERMAP_RPC_POLYGON, solana: process.env.WAFERMAP_RPC_SOLANA };
+      const RPC: Partial<Record<Net, string | undefined>> = { robinhood: process.env.WAFERMAP_RPC_ROBINHOOD, base: process.env.WAFERMAP_RPC_BASE, arbitrum: process.env.WAFERMAP_RPC_ARBITRUM, polygon: process.env.WAFERMAP_RPC_POLYGON, arc: process.env.WAFERMAP_RPC_ARC, soneium: process.env.WAFERMAP_RPC_SONEIUM, solana: process.env.WAFERMAP_RPC_SOLANA };
       // four at a time: public RPCs refuse bursts
       const chain: (Awaited<ReturnType<typeof checkPayment>> | null)[] = [];
       if (verify) {
@@ -284,7 +284,7 @@ Total $${total.toFixed(4)} in ${pays.length} payments. From 0.3.3 every payment 
       const wm = openWallet(await password());
       const list = await wm.discover(q, Number(a.flags.limit ?? 10));
       for (const s of list) console.log(`${s.payable ? "●" : "○"} ${s.priceUsd !== null ? `$${s.priceUsd}`.padEnd(8) : "—".padEnd(8)} ${s.method.padEnd(4)} ${s.url}\n    ${s.description.slice(0, 140)}${s.input ? `\n    input: ${JSON.stringify(s.input).slice(0, 140)}` : ""}`);
-      return console.log(`\n● payable with USDG (Robinhood Chain) or USDC (Solana, Base, Arbitrum, Polygon)   ○ other networks only`);
+      return console.log(`\n● payable with USDG (Robinhood Chain) or USDC (Solana, Base, Arbitrum, Polygon, Arc, Soneium)   ○ other networks only`);
     }
 
     case "call": {
@@ -312,7 +312,7 @@ Total $${total.toFixed(4)} in ${pays.length} payments. From 0.3.3 every payment 
       const addr = keystoreAddress() ?? die("No wallet yet. Run `wafermap init`.");
       const { Wafermap } = await import("./core.js");
       // Balances need no key: a throwaway account with the same address is enough to read.
-      const wm = new Wafermap({ account: { ...privateKeyToAccount(generatePrivateKey()), address: addr as `0x${string}` } as any, solanaAddress: keystoreSolana() ?? undefined, baseUrl: process.env.WAFERMAP_URL, rpc: { robinhood: process.env.WAFERMAP_RPC_ROBINHOOD, base: process.env.WAFERMAP_RPC_BASE, arbitrum: process.env.WAFERMAP_RPC_ARBITRUM, polygon: process.env.WAFERMAP_RPC_POLYGON, solana: process.env.WAFERMAP_RPC_SOLANA } });
+      const wm = new Wafermap({ account: { ...privateKeyToAccount(generatePrivateKey()), address: addr as `0x${string}` } as any, solanaAddress: keystoreSolana() ?? undefined, baseUrl: process.env.WAFERMAP_URL, rpc: { robinhood: process.env.WAFERMAP_RPC_ROBINHOOD, base: process.env.WAFERMAP_RPC_BASE, arbitrum: process.env.WAFERMAP_RPC_ARBITRUM, polygon: process.env.WAFERMAP_RPC_POLYGON, arc: process.env.WAFERMAP_RPC_ARC, soneium: process.env.WAFERMAP_RPC_SONEIUM, solana: process.env.WAFERMAP_RPC_SOLANA } });
       const b = await wm.balances();
       console.log(addr);
       for (const n of NETS) console.log(`  ${n.padEnd(10)} ${b[n] ? `${Number(b[n]!.stable).toFixed(4)} ${b[n]!.symbol}   ${Number(b[n]!.eth).toPrecision(4)} ${b[n]!.gas}` : n === "solana" && !wm.solanaAddress ? "run `wafermap address` once with WAFERMAP_PASSWORD set" : "unreadable (RPC did not answer)"}`);

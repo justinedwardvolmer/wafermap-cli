@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.8 (5 Nov 2026)
+
+**Two more payment networks: Arc and Soneium.**
+
+- `--network arc` pays in USDC on Arc (eip155:5042, the ERC-20 face of Arc's native USDC at `0x3600…0000`, 6 decimals) and `--network soneium` in bridged USDC.e on Soneium (eip155:1868). Both are EIP-3009 transfers, gasless for you; Wafermap settles them through the Elsa facilitator. The EIP-712 domains (`"USDC", "2"` and `"Bridged USDC (Soneium)", "2"`) were checked against each token's `DOMAIN_SEPARATOR()`.
+- `balance`, `withdraw` and `history --verify` cover both. RPCs: `WAFERMAP_RPC_ARC`, `WAFERMAP_RPC_SONEIUM` (public ones by default). On Arc the gas token is USDC itself; on Soneium it is ETH.
+- The MCP server's `network` option takes `arc` and `soneium`.
+- LLM resources can stream: pass `accept: text/event-stream` to `x402fetch` and read `delta`, `receipt` and `done` events (https://wafermap.xyz/docs#streaming). Payment works as before and settles once the model finished.
+
 ## 0.4.7 (4 Nov 2026)
 
 **`history --verify` checks Solana payments.** Until now they showed `unknown`.

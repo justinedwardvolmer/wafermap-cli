@@ -427,14 +427,16 @@ export const PAY_NETWORKS = {
   base: { ...NETWORKS.base, vm: "evm" },
   arbitrum: { id: 42161, caip: "eip155:42161", name: "Arbitrum", asset: "USDC", explorer: "https://arbiscan.io", vm: "evm" },
   polygon: { id: 137, caip: "eip155:137", name: "Polygon", asset: "USDC", explorer: "https://polygonscan.com", vm: "evm" },
+  arc: { id: 5042, caip: "eip155:5042", name: "Arc", asset: "USDC", explorer: "https://explorer.arc.io", vm: "evm" },
+  soneium: { id: 1868, caip: "eip155:1868", name: "Soneium", asset: "USDC", explorer: "https://soneium.blockscout.com", vm: "evm" },
 } as const;
 export type PayNetworkKey = keyof typeof PAY_NETWORKS;
 /** The EVM payment networks, which the Wafermap wallet (web and CLI) can sign for. */
-export const EVM_PAY = ["robinhood", "base", "arbitrum", "polygon"] as const;
+export const EVM_PAY = ["robinhood", "base", "arbitrum", "polygon", "arc", "soneium"] as const;
 export type EvmPayKey = (typeof EVM_PAY)[number];
 export const isEvmPay = (v: unknown): v is EvmPayKey => EVM_PAY.includes(v as EvmPayKey);
 /** Every network the Wafermap agent wallet pays on, in the order the UI lists them. */
-export const PAY_KEYS = ["robinhood", "solana", "base", "arbitrum", "polygon"] as const satisfies readonly PayNetworkKey[];
+export const PAY_KEYS = ["robinhood", "solana", "base", "arbitrum", "polygon", "arc", "soneium"] as const satisfies readonly PayNetworkKey[];
 export const isPayKey = (v: unknown): v is PayNetworkKey => PAY_KEYS.includes(v as PayNetworkKey);
 /** "eip155:42161", "arbitrum" or "42161" → "arbitrum". */
 export function payNetworkOf(v: string): PayNetworkKey | null {

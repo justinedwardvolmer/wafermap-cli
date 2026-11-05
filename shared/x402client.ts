@@ -3,7 +3,7 @@ import { SOLANA_CAIP, SOLANA_USDC, solanaPaymentSigned, type SolanaPayer } from 
 // A small x402 buyer used by the web app, the CLI, the SDK and the MCP server.
 // It pays any x402 endpoint (Wafermap's own /v1 or a third-party service found through
 // discovery) that accepts the `exact` scheme in a USD stablecoin we know on an EVM chain
-// (USDG on Robinhood Chain; USDC on Base, Arbitrum, Polygon) or USDC on Solana, so every price
+// (USDG on Robinhood Chain; USDC on Base, Arbitrum, Polygon, Arc, Soneium) or USDC on Solana, so every price
 // can be checked against the user's caps in dollars. Solana is paid only when the caller passes
 // a Solana payer (see ./solana).
 // Both protocol versions are handled: v2 (PAYMENT-REQUIRED / PAYMENT-SIGNATURE headers)
@@ -17,7 +17,7 @@ export type Signer = {
   signTypedData: (args: { domain: any; types: any; primaryType: string; message: any }) => Promise<Hex>;
 };
 
-export type ChainKey = "robinhood" | "base" | "arbitrum" | "polygon" | "solana";
+export type ChainKey = "robinhood" | "base" | "arbitrum" | "polygon" | "arc" | "soneium" | "solana";
 export type Chain = { key: ChainKey; vm: "evm" | "svm"; id: number; caip: string; v1: string; stable: string; symbol: string; name: string; domain?: { name: string; version: string } };
 
 const USDC_DOMAIN = { name: "USD Coin", version: "2" };
@@ -27,6 +27,9 @@ export const PAY_CHAINS: Chain[] = [
   { key: "base", vm: "evm", id: 8453, caip: "eip155:8453", v1: "base", stable: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913", symbol: "USDC", name: "Base", domain: USDC_DOMAIN },
   { key: "arbitrum", vm: "evm", id: 42161, caip: "eip155:42161", v1: "arbitrum", stable: "0xaf88d065e77c8cC2239327C5EDb3A432268e5831", symbol: "USDC", name: "Arbitrum", domain: USDC_DOMAIN },
   { key: "polygon", vm: "evm", id: 137, caip: "eip155:137", v1: "polygon", stable: "0x3c499c542cEF5E3811e1192ce70d8cC03d5c3359", symbol: "USDC", name: "Polygon", domain: USDC_DOMAIN },
+  // EIP-712 domains read from the token contracts (name(), version()) and checked against DOMAIN_SEPARATOR().
+  { key: "arc", vm: "evm", id: 5042, caip: "eip155:5042", v1: "arc", stable: "0x3600000000000000000000000000000000000000", symbol: "USDC", name: "Arc", domain: { name: "USDC", version: "2" } },
+  { key: "soneium", vm: "evm", id: 1868, caip: "eip155:1868", v1: "soneium", stable: "0xbA9986D2381edf1DA03B0B9c1f8b00dc4AacC369", symbol: "USDC", name: "Soneium", domain: { name: "Bridged USDC (Soneium)", version: "2" } },
 ];
 export const EVM_CHAINS = PAY_CHAINS.filter((c) => c.vm === "evm");
 export const CHAIN_KEYS = PAY_CHAINS.map((c) => c.key);
@@ -181,7 +184,7 @@ export function choose(q: Quote, prefer: ChainKey[] = CHAIN_KEYS): Requirement {
     const r = q.accepts.find((a) => a.chain.key === k);
     if (r) return r;
   }
-  throw new X402Error("no_supported_payment", q.offered.length ? `This service only accepts ${[...new Set(q.offered)].join(", ")}. Wafermap pays USDG on Robinhood Chain or USDC on Solana, Base, Arbitrum or Polygon.` : "The service offered no payment option.");
+  throw new X402Error("no_supported_payment", q.offered.length ? `This service only accepts ${[...new Set(q.offered)].join(", ")}. Wafermap pays USDG on Robinhood Chain or USDC on Solana, Base, Arbitrum, Polygon, Arc or Soneium.` : "The service offered no payment option.");
 }
 
 const TYPES = {

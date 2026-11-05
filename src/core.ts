@@ -1,7 +1,7 @@
 // The Wafermap SDK. One class for an agent that holds its own key:
 //   call()     pay-per-call Wafermap resources over x402
 //   discover() search the open x402 index for third-party services
-//   pay()      call any x402 URL and pay it (USDG on Robinhood Chain; USDC on Solana, Base, Arbitrum, Polygon)
+//   pay()      call any x402 URL and pay it (USDG on Robinhood Chain; USDC on Solana, Base, Arbitrum, Polygon, Arc, Soneium)
 //   swapQuote() / swap()  trade tokens through the KyberSwap aggregator
 // Every payment is checked against per-payment and daily caps before anything is signed;
 // swaps are checked against a per-swap cap. The daily cap counts what this wallet signed, at the
@@ -9,7 +9,7 @@
 // Nothing is ever sent to Wafermap but the signed payment header the x402 protocol requires.
 import { createPublicClient, createWalletClient, erc20Abi, formatUnits, getAddress, http, isAddress, pad, parseAbiItem, parseUnits, toEventSelector, type Hex, type LocalAccount, type PublicClient } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { arbitrum, base, polygon, robinhood } from "viem/chains";
+import { arbitrum, arc, base, polygon, robinhood, soneium } from "viem/chains";
 import { TOKENS, executeSwap, quoteSwap, resolveToken, type Net as SwapNet, type SwapQuote, type Token } from "../shared/swap";
 import { checkSolanaPayment, latestBlockhash, latestBlockhashInfo, solanaBalances, solanaKeyFromEvm, type SolanaPayer } from "../shared/solana";
 import { CHAIN_KEYS, PAY_CHAINS, PERMIT2, WAFERMAP_TOKEN, x402fetch, X402Error, type ChainKey, type Requirement, type Signed } from "../shared/x402client";
@@ -66,7 +66,7 @@ export type WafermapOptions = {
   solanaAddress?: string;
   /** Default https://wafermap.xyz */
   baseUrl?: string;
-  /** Preferred payment network. Default robinhood (USDG); base, arbitrum, polygon and solana pay in USDC. */
+  /** Preferred payment network. Default robinhood (USDG); base, arbitrum, polygon, arc, soneium and solana pay in USDC. */
   network?: Net;
   limits?: Partial<Limits>;
   /** Where spending is remembered for the daily cap. Default: in memory. */
@@ -92,7 +92,7 @@ export class WafermapError extends Error {
   }
 }
 
-const CHAINS = { robinhood, base, arbitrum, polygon } as const;
+const CHAINS = { robinhood, base, arbitrum, polygon, arc, soneium } as const;
 const AUTH_STATE_ABI = [{ type: "function", name: "authorizationState", stateMutability: "view", inputs: [{ name: "authorizer", type: "address" }, { name: "nonce", type: "bytes32" }], outputs: [{ type: "bool" }] }] as const;
 
 /** One row per payment: the signed line joined with its outcome line. Old single lines pass through. */

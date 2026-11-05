@@ -14,7 +14,7 @@ import { openWallet } from "./local.js";
 import { config, spendLog } from "./store.js";
 import { VERSION } from "./version.js";
 
-const NET = z.enum(["robinhood", "solana", "base", "arbitrum", "polygon"]).optional().describe("Payment network: robinhood (USDG), or solana, base, arbitrum or polygon (USDC). Defaults to your configured network.");
+const NET = z.enum(["robinhood", "solana", "base", "arbitrum", "polygon", "arc", "soneium"]).optional().describe("Payment network: robinhood (USDG), or solana, base, arbitrum, polygon, arc or soneium (USDC). Defaults to your configured network.");
 const SWAP_NET = z.enum(["robinhood", "base"]).optional().describe("Swap network: robinhood or base. Defaults to your configured network when it is one of these, else robinhood.");
 
 function text(v: unknown) {
@@ -136,7 +136,7 @@ export async function runMcp() {
     "wafermap_discover",
     {
       title: "Discover x402 services",
-      description: "Search the open x402 index for third-party paid APIs (weather, search, enrichment, data…). Services marked payable accept USDG on Robinhood Chain or USDC on Solana, Base, Arbitrum or Polygon and can be called with wafermap_pay.",
+      description: "Search the open x402 index for third-party paid APIs (weather, search, enrichment, data…). Services marked payable accept USDG on Robinhood Chain or USDC on Solana, Base, Arbitrum, Polygon, Arc or Soneium and can be called with wafermap_pay.",
       inputSchema: { query: z.string().min(2).describe("What you need, in a few words."), limit: z.number().int().min(1).max(20).optional() },
     },
     async ({ query, limit }) => {

@@ -6,7 +6,7 @@ The CLI, SDK and MCP server behind [Wafermap](https://wafermap.xyz): an x402 wal
 - **discover** third-party x402 services in the open x402 index and **pay** them
 - **swap** tokens through the KyberSwap aggregator
 
-Every payment is checked against a per-payment cap and a daily cap before anything is signed. Swaps have their own per-swap cap. Payments settle in USDG on Robinhood Chain or USDC on Solana, Base, Arbitrum or Polygon and are gasless; swaps need a little ETH for gas.
+Every payment is checked against a per-payment cap and a daily cap before anything is signed. Swaps have their own per-swap cap. Payments settle in USDG on Robinhood Chain or USDC on Solana, Base, Arbitrum, Polygon, Arc or Soneium and are gasless; swaps need a little ETH for gas.
 
 ## Install
 
@@ -35,7 +35,7 @@ wafermap swap 0.01 ETH USDG
 wafermap history
 ```
 
-Add `--yes` to skip the confirmation prompt (caps still apply), `--network base`, `arbitrum`, `polygon` or `solana` to pay in USDC on that network (swaps run on `robinhood` or `base`). Set `WAFERMAP_PASSWORD` to avoid the password prompt in scripts.
+Add `--yes` to skip the confirmation prompt (caps still apply), `--network base`, `arbitrum`, `polygon`, `arc`, `soneium` or `solana` to pay in USDC on that network (swaps run on `robinhood` or `base`). Set `WAFERMAP_PASSWORD` to avoid the password prompt in scripts.
 
 ## MCP server
 
@@ -82,7 +82,7 @@ Pass `approve: (a) => boolean` to confirm each payment or swap yourself, and `le
 
 ## $WAFERMAP holder discount
 
-A wallet that holds at least 100,000 $WAFERMAP on Robinhood Chain pays 50% less for Wafermap's own resources when it pays on an EVM network (Robinhood Chain, Base, Arbitrum, Polygon). Nothing to set up: `wafermap call` names the wallet to Wafermap and the quote comes back discounted; the server re-checks the balance of the wallet that signs. Marketplace listings and Solana payments keep the regular price. Check a wallet: https://wafermap.xyz/api/holder?address=0x…, or run `wafermap holder`.
+A wallet that holds at least 100,000 $WAFERMAP on Robinhood Chain pays 50% less for Wafermap's own resources when it pays on an EVM network (Robinhood Chain, Base, Arbitrum, Polygon, Arc, Soneium). Nothing to set up: `wafermap call` names the wallet to Wafermap and the quote comes back discounted; the server re-checks the balance of the wallet that signs. Marketplace listings and Solana payments keep the regular price. Check a wallet: https://wafermap.xyz/api/holder?address=0x…, or run `wafermap holder`.
 
 Wafermap's own resources can also be **paid in $WAFERMAP at 50% off, and the tokens are burned**: `wafermap approve-wafermap` once (a Permit2 approval, one Robinhood Chain transaction), then `wafermap call <id> --pay wafermap`. Each payment is a Permit2 signature for one exact amount, usable for two minutes only by Wafermap's relayer (fixed in the client), checked against a market price the client reads itself.
 
