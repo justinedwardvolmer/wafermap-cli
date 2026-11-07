@@ -422,22 +422,65 @@ export class Wafermap {
     }
   }
 
-  async call(id: string, input: Record<string, unknown> = {}, o: { network?: Net; payIn?: "stablecoin" | "wafermap" } = {}) {
+  /** Reads /v1's server-sent events for an LLM call: delta pieces as they arrive, then receipt (or error), then done. */
+  private async readStream(res: Response, onDelta: (text: string) => void) {
+    const reader = res.body!.pipeThrough(new TextDecoderStream()).getReader();
+    let buf = "";
+    let receipt: any = null;
+    let done: any = null;
+    let error: any = null;
+    for (;;) {
+      const { value, done: end } = await reader.read();
+      if (end) break;
+      buf += value;
+      let i: number;
+      while ((i = buf.indexOf("\n\n")) >= 0) {
+        const block = buf.slice(0, i);
+        buf = buf.slice(i + 2);
+        const ev = /^event: (.+)$/m.exec(block)?.[1];
+        let data: any = null;
+        try {
+          data = JSON.parse(/^data: (.*)$/m.exec(block)?.[1] ?? "null");
+        } catch {}
+        if (ev === "delta" && typeof data?.text === "string") onDelta(data.text);
+        else if (ev === "receipt") receipt = data;
+        else if (ev === "done") done = data;
+        else if (ev === "error") error = data;
+      }
+    }
+    return { receipt, done, error };
+  }
+
+  async call(id: string, input: Record<string, unknown> = {}, o: { network?: Net; payIn?: "stablecoin" | "wafermap"; onDelta?: (text: string) => void } = {}) {
     const inToken = o.payIn === "wafermap";
+    // LLMs stream when asked (Accept: text/event-stream); the server settles only after the last piece. Free calls
+    // and $WAFERMAP payments still answer in one JSON body, so both shapes are read below.
+    const stream = !!o.onDelta && !inToken;
     if (inToken && id.startsWith("m/")) throw new WafermapError("token_not_offered", "Marketplace listings are paid in USDG or USDC to their seller, not in $WAFERMAP.");
     if (inToken && !(await this.wafermapApproved().catch(() => true))) throw new WafermapError("permit2_not_approved", "Paying in $WAFERMAP needs a one-time approval of Permit2. Run `wafermap approve-wafermap` (one transaction on Robinhood Chain, paid in ETH), then call again.");
     // X-Wafermap-Payer names this wallet so a $WAFERMAP holder is quoted the holder price, and the holder pass lets
     // a Pro holder's free calls apply (no payment is signed then). Both go to Wafermap only, never to third-party
     // services or marketplace sellers; the server checks the balance again itself.
     const pass = id.startsWith("m/") ? null : await this.holderPass();
-    const go = () => this.paidFetch("resource", id, `${this.baseUrl}/v1/${id}`, { method: "POST", headers: { "content-type": "application/json", "x-wafermap-payer": this.address, ...(pass ? { [PASS_HEADER]: pass } : {}) }, body: JSON.stringify(input) }, o.network, inToken ? "wafermap" : undefined);
+    const go = () => this.paidFetch("resource", id, `${this.baseUrl}/v1/${id}`, { method: "POST", headers: { "content-type": "application/json", "x-wafermap-payer": this.address, ...(stream ? { accept: "text/event-stream" } : {}), ...(pass ? { [PASS_HEADER]: pass } : {}) }, body: JSON.stringify(input) }, o.network, inToken ? "wafermap" : undefined);
     const settle = (r: Awaited<ReturnType<typeof go>>, out: any) => {
       if (!r.paid || !r.id) return;
-      const status: PaymentStatus = r.res.status === 402 ? "refused" : r.res.ok ? "ok" : "failed";
+      const status: PaymentStatus = r.res.status === 402 ? "refused" : r.res.ok && !out?.streamError ? "ok" : "failed";
       this.outcome(r.id, "resource", id, r.paid, status, out?.receipt?.tx ?? r.paid.tx, typeof out?.receipt?.amountUsd === "number" ? out.receipt.amountUsd : null);
     };
     const host = new URL(this.baseUrl).host;
-    const read = (r: Awaited<ReturnType<typeof go>>) => this.body(r.res, () => r.res.json(), {} as any, host, r.paid?.auth ?? (r.paid ? {} : null));
+    const read = (r: Awaited<ReturnType<typeof go>>) =>
+      this.body(
+        r.res,
+        async (): Promise<any> => {
+          if (!(stream && r.res.ok && (r.res.headers.get("content-type") ?? "").includes("text/event-stream"))) return r.res.json();
+          const s = await this.readStream(r.res, o.onDelta!);
+          return { resource: id, result: { text: s.done?.text ?? "", model: s.done?.model, usage: s.done?.usage }, receipt: s.receipt, streamError: s.error };
+        },
+        {} as any,
+        host,
+        r.paid?.auth ?? (r.paid ? {} : null),
+      );
     let r = await go();
     let out: any = await read(r);
     settle(r, out);
@@ -454,6 +497,7 @@ export class Wafermap {
     const { res, paid } = r;
     const refused = this.rejected(res, out, paid);
     if (refused) throw refused;
+    if (out?.streamError) throw new WafermapError(out.streamError.code ?? "stream_failed", out.streamError.message ?? "The answer did not finish. You were not charged.");
     if (!res.ok) throw new WafermapError(out?.error?.code ?? "http_error", out?.error?.message ?? (typeof out?.error === "string" ? out.error : `HTTP ${res.status}`));
     return out as { resource: string; result: any; receipt: { network: string; asset: string; amountUsd: number; amountTokens?: number; burned?: boolean; payer: string; tx: string; ms: number } | null; free?: { wallet: string; left: number; perDay: number } };
   }

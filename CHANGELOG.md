@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.4.9 (7 Nov 2026)
+
+**`wafermap call <llm> --stream`: watch the answer arrive.**
+
+- With `--stream`, an LLM resource answers as server-sent events and the CLI prints each piece as it comes. The payment is the same signature as before; Wafermap settles it only after the last piece, so a model that stops halfway charges nothing (the CLI then exits with `stream_broken`).
+- Free calls ($WAFERMAP Pro) and `--pay wafermap` still answer in one JSON body; `--stream` prints that the usual way.
+- `Wafermap.call()` takes `onDelta(text)` for the same thing from code.
+
 ## 0.4.8 (5 Nov 2026)
 
 **Two more payment networks: Arc and Soneium.**

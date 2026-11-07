@@ -25,6 +25,7 @@ Pay
   wafermap resources [words]            Wafermap's pay-per-call catalog
   wafermap call <id> [field=value ...]  run a resource and pay its price  (--json '{...}' for complex input)
   wafermap call <id> ... --pay wafermap pay a Wafermap resource in $WAFERMAP at 50% off (the tokens are burned)
+  wafermap call <llm> ... --stream       print the answer as it arrives; you pay only once the model finishes
   wafermap approve-wafermap             one-time approval so the wallet can pay in $WAFERMAP (Robinhood Chain, ETH gas)
   wafermap holder                       what this wallet's $WAFERMAP unlocks: holder price, Pro free calls left today
   wafermap pass                         print a holder pass (X-Wafermap-Pass) for scripts and x402 Tracker Pro
@@ -48,7 +49,7 @@ function parse(argv: string[]): Args {
     if (a.startsWith("--")) {
       const [k, v] = a.slice(2).split("=", 2);
       if (v !== undefined) out.flags[k] = v;
-      else if (argv[i + 1] && !argv[i + 1].startsWith("--") && !["yes", "post", "import"].includes(k)) out.flags[k] = argv[++i];
+      else if (argv[i + 1] && !argv[i + 1].startsWith("--") && !["yes", "post", "import", "stream"].includes(k)) out.flags[k] = argv[++i];
       else out.flags[k] = true;
     } else out._.push(a);
   }
@@ -291,12 +292,16 @@ Total $${total.toFixed(4)} in ${pays.length} payments. From 0.3.3 every payment 
       const id = a._[0] ?? die("Which resource? e.g. wafermap call gas-now network=base");
       const wm = openWallet(await password(), approver(yes));
       const payIn = a.flags.pay === "wafermap" ? "wafermap" : a.flags.pay === undefined || a.flags.pay === "usd" ? undefined : die("--pay must be wafermap (or leave it out to pay in USDG/USDC)");
-      const out = await wm.call(id, inputOf(a, 1), { network: net(a.flags.network), payIn });
+      // --stream prints an LLM's answer as it arrives; the payment settles only after the last piece.
+      let streamed = false;
+      const onDelta = a.flags.stream === true ? (t: string) => ((streamed = true), process.stdout.write(t)) : undefined;
+      const out = await wm.call(id, inputOf(a, 1), { network: net(a.flags.network), payIn, onDelta });
+      if (streamed) process.stdout.write("\n");
       if (out.receipt?.asset === "WAFERMAP") console.error(`✓ Paid ${out.receipt.amountTokens} $WAFERMAP (≈ $${out.receipt.amountUsd}), burned · ${EXPLORER(out.receipt.network)}/tx/${out.receipt.tx}`);
       else if (out.receipt) console.error(`✓ Paid $${out.receipt.amountUsd} ${out.receipt.asset} · ${EXPLORER(out.receipt.network)}/tx/${out.receipt.tx}`);
       else if (out.free) console.error(`✓ Free call ($WAFERMAP Pro) · ${out.free.left} of ${out.free.perDay} left today. Nothing was paid.`);
       if (typeof a.flags.out === "string") await saveMedia(out.result, a.flags.out);
-      return printResult(out.result);
+      return streamed ? undefined : printResult(out.result);
     }
 
     case "pay": {
